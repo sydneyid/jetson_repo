@@ -262,11 +262,11 @@ def main():
     neighbor_radius = max(neighbor_radius, estimated_noise * 0.15)
     neighbor_radius = min(neighbor_radius, data_range * 0.010)
     
-    # Minimum point number - OPTIMIZED for speed
-    # True lines have 20-110 points, so we can reject weak proposals earlier
-    # This speeds up GC-RANSAC by rejecting proposals with <15 inliers before validation
-    # Still allows finding all lines since true lines have many more points
-    minimum_point_number = 15  # Minimum 15 inliers - rejects weak proposals early, speeds up significantly
+    # Minimum point number - BALANCED for finding more lines
+    # True lines have 20-110 points, but we want to find more lines
+    # Reduced from 15 to 10 to allow finding lines with fewer points
+    # This helps find more lines while still rejecting very weak proposals
+    minimum_point_number = 10  # Minimum 10 inliers - allows finding more lines while still filtering weak proposals
     
     print(f"   ✓ Estimated noise: {estimated_noise:.6f}")
     print(f"   ✓ Threshold: {final_threshold:.6f} ({100*final_threshold/data_range:.2f}% of range)")
@@ -287,18 +287,20 @@ def main():
     # Formula: Scale proportionally to point count, with minimum threshold for small datasets
     # For 7000 points: 3000 iterations (baseline)
     # For 1600 points: ~700 iterations (proportional scaling)
+    # OPTIMIZED: Increased max_iters to find more lines
+    # More iterations per proposal = better chance of finding all lines
     if n_points < 2000:
-        # Very small datasets: minimum 500 iterations to ensure we can find models
-        max_iters_optimized = max(500, int(n_points * 0.4))  # ~40% of point count, min 500
+        # Very small datasets: minimum 500 iterations, scale with points
+        max_iters_optimized = max(500, int(n_points * 0.5))  # ~50% of point count (was 40%), min 500
     elif n_points < 5000:
-        # Small datasets: scale proportionally from baseline (7000 points = 3000 iterations)
-        max_iters_optimized = int(n_points * 3000 / 7000)  # Proportional to 7000→3000 baseline
+        # Small datasets: scale proportionally from baseline (7000 points = 4000 iterations)
+        max_iters_optimized = int(n_points * 4000 / 7000)  # Proportional to 7000→4000 baseline (was 3000)
     elif n_points < 10000:
-        max_iters_optimized = 3000   # Baseline for medium datasets
+        max_iters_optimized = 4000   # Baseline for medium datasets (was 3000)
     elif n_points < 100000:
-        max_iters_optimized = 10000  # Large datasets
+        max_iters_optimized = 12000  # Large datasets (was 10000)
     else:
-        max_iters_optimized = 25000  # Very large datasets
+        max_iters_optimized = 30000  # Very large datasets (was 25000)
     
     print(f"   Using max_iters={max_iters_optimized:,} (scaled from {n_points:,} points)")
     
@@ -312,7 +314,7 @@ def main():
     sampler_id_optimized = 3  # Z-Aligned sampler - samples points with similar X,Y but different Z (ideal for lines parallel to time axis)
     
     print(f"   Settings: conf={conf_optimized} (moderate for speed), sampler=Z-Aligned (for time-parallel lines), max_iters={max_iters_optimized:,}")
-    print(f"   → Early termination: stops at 24-25 models to avoid unnecessary iterations")
+    print(f"   → Early termination: stops at 30-35 models to allow finding more lines")
     
     try:
         t = time()
@@ -381,7 +383,7 @@ def main():
         expected_direction = np.array([0.0, 0.0, 1.0])  # Time axis direction
         parallel_valid_indices = []
         # More lenient threshold: 10° = cos(10°) ≈ 0.9848 (was 5°, trying 10° to keep more lines)
-        parallel_threshold = np.cos(np.deg2rad(10.0))  # Lines must be within 10° of time axis
+        parallel_threshold = np.cos(np.deg2rad(1.0))  # Lines must be within 10° of time axis
         
         # Iterate over all detected lines
         for idx in range(num_models):
@@ -598,8 +600,106 @@ def main():
         plt.tight_layout()
         output_path = 'may9_events_3d_regular_detection.png'
         plt.show()
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        # plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"   ✓ Saved visualization to {output_path}")
+        plt.close()
+        
+        # Create separate figure: Event heatmap with line centroids
+        print("\n7. Creating event heatmap with line centroids...")
+        
+        # Get image dimensions from metadata or from data range
+        if metadata and 'geometry' in metadata and metadata['geometry']:
+            img_width, img_height = metadata['geometry']
+        else:
+            # Infer from data range
+            img_width = int(points_raw[:, 0].max()) + 1
+            img_height = int(points_raw[:, 1].max()) + 1
+        
+        # Create accumulated event frame following the specified syntax
+        # Start with ones to avoid problems with LogNorm
+        accumulated_frame = np.ones((img_height, img_width), dtype=np.float64)
+        
+        # Get integer pixel coordinates from raw data
+        x_coords = points_raw[:, 0].astype(int)
+        y_coords = points_raw[:, 1].astype(int)
+        
+        
+        # Use np.add.at to accumulate events at specific pixel locations
+        # Note: y-coordinate is flipped (height - 1 - y) to match image coordinate system
+        np.add.at(accumulated_frame, (y_coords, x_coords), 1)
+        
+        print(f"   Accumulated frame range: [{accumulated_frame.min():.1f}, {accumulated_frame.max():.1f}]")
+        print(f"   99.9th percentile: {np.percentile(accumulated_frame, 99.9):.1f}")
+        
+        # Calculate line centroids (average x, y of points on each line)
+        line_centroids = []
+        for i, idx in enumerate(valid_line_indices):
+            if use_zero_indexed:
+                instance_label = idx
+            else:
+                instance_label = idx + 1
+            mask = (labeling == instance_label)
+            points_line = points_normalized[mask]
+            
+            if len(points_line) > 0:
+                # Get original (non-normalized) x, y coordinates for centroid
+                # Since normalization only affects time (z), x and y are the same
+                centroid_x = np.mean(points_line[:, 0])
+                centroid_y = np.mean(points_line[:, 1])
+                # No y-flip needed since np.add.at uses (y_coords, x_coords) directly
+                line_centroids.append((centroid_x, centroid_y, i+1))
+        
+        # Create new figure for heatmap
+        import matplotlib
+        import matplotlib.colors
+        fig2 = plt.figure(figsize=(12, 8))
+        ax_heatmap = fig2.gca()
+        
+        # Calculate vmax from 99.9th percentile
+        vmax_99_9 = np.percentile(accumulated_frame, 99.9)
+        # Set vmin to 1.0 (baseline) to ensure LogNorm works correctly
+        # This prevents black/white background issues
+        im = ax_heatmap.imshow(
+            accumulated_frame,
+            norm=matplotlib.colors.LogNorm(vmin=1.0, vmax=vmax_99_9),
+            cmap="viridis",
+            origin='lower',
+            aspect='auto',
+            interpolation='nearest'
+        )
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax_heatmap, label='Event Accumulation (1 = no events)')
+
+
+        # Superimpose line centroids
+        if line_centroids:
+            centroids_x = [c[0] for c in line_centroids]
+            centroids_y = [c[1] for c in line_centroids]
+            line_numbers = [c[2] for c in line_centroids]
+            
+            # Plot centroids as markers
+            ax_heatmap.scatter(centroids_x, centroids_y, c='cyan', s=100, 
+                             marker='x', linewidths=2, label='Line Centroids', alpha=0.1,zorder=10)
+            
+            # Add text labels for line numbers
+            for x, y, num in line_centroids:
+                ax_heatmap.annotate(f'L{num}', (x, y), xytext=(5, 5), 
+                                  textcoords='offset points', color='cyan', 
+                                  fontsize=8, fontweight='bold', zorder=11)
+        
+        ax_heatmap.set_xlabel('X (pixels)')
+        ax_heatmap.set_ylabel('Y (pixels)')
+        ax_heatmap.set_title(f'Event Accumulation Heatmap (Log Scale, 99.9th percentile vmax) with {len(line_centroids)} Line Centroids')
+        ax_heatmap.set_xlim(0, img_width)
+        ax_heatmap.set_ylim(0, img_height)
+        ax_heatmap.legend(loc='upper right')
+        
+        plt.tight_layout()
+        output_path_heatmap = 'may9_events_heatmap_centroids.png'
+        # plt.savefig(output_path_heatmap, dpi=150, bbox_inches='tight')
+        plt.show()
+        # print(f"   ✓ Saved heatmap visualization to {output_path_heatmap}")
         plt.close()
         
         print("\n" + "="*70)

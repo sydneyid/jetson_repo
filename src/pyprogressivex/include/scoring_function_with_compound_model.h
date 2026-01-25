@@ -85,17 +85,18 @@ namespace progx
 			double squared_residual, score_value; // The point-to-model residual
 			Eigen::MatrixXd preference_vector = Eigen::MatrixXd::Zero(point_number, 1); // Initializing the preference vector
 
-			// SMART HEURISTIC: Early rejection for clearly terrible models
-			// Only reject models with near-zero inliers in a quick sample check
-			// This avoids expensive full inlier counting for obviously bad models
-			// Very conservative: only reject if sample shows < 1% inliers (clearly terrible)
-			if (point_number > 1000 && best_score_.inlier_number > min_inliers_required) {
+			// OPTIMIZED HEURISTIC: Less aggressive early rejection to find more lines
+			// Only reject clearly terrible models (0 inliers) to avoid missing good lines
+			// This helps find more lines while still providing some speedup
+			if (point_number > 1000 && best_score_.inlier_number > min_inliers_required * 2) {
 				// Only do early rejection if we already have a good model (not the first few)
-				const size_t quick_check_points = 30;  // Check 30 points quickly
-				size_t quick_inliers = 0;
-				const size_t step = point_number / quick_check_points;
+				// And only if best score is significantly above minimum (have good models already)
 				
-				// Quick check: sample 30 evenly spaced points
+				// Quick check (30 points) - only reject if zero inliers (clearly terrible)
+				const size_t quick_check = 30;
+				size_t quick_inliers = 0;
+				const size_t step = point_number / quick_check;
+				
 				for (size_t i = 0; i < point_number; i += step) {
 					squared_residual = estimator_.squaredResidual(points_.row(i), model_.descriptor);
 					if (squared_residual < squared_truncated_threshold) {
@@ -103,15 +104,15 @@ namespace progx
 					}
 				}
 				
-				// Very conservative: Only reject if we see < 1% inliers (clearly terrible model)
-				// This means < 1 inlier in 30 point sample - model is almost certainly bad
+				// Very conservative: Only reject if zero inliers (clearly terrible model)
+				// This avoids rejecting good models while still providing some speedup
 				if (quick_inliers == 0) {
-					// Zero inliers in sample - model is clearly terrible, reject immediately
-					return gcransac::Score();
+					return gcransac::Score();  // Reject - clearly terrible
 				}
 			}
 
 			// Iterate through all points, calculate the squared_residuals and store the points as inliers if needed.
+			// OPTIMIZED: Early termination during counting if we can't beat best model
 			for (size_t point_idx = 0; point_idx < point_number; ++point_idx)
 			{
 				// Calculate the point-to-model residual
@@ -138,7 +139,21 @@ namespace progx
 						
 				}
 
-				// Interrupt if there is no chance of being better than the best model
+				// OPTIMIZED: More aggressive early termination during counting
+				// If we've checked enough points and clearly can't beat best, stop early
+				if (best_score_.inlier_number > 0 && point_idx > point_number / 4) {
+					// After checking 25% of points, estimate if we can beat best
+					size_t remaining_points = point_number - point_idx;
+					double current_ratio = static_cast<double>(score.inlier_number) / (point_idx + 1);
+					size_t estimated_total = static_cast<size_t>(current_ratio * point_number);
+					
+					// If estimated total is clearly below best, terminate early
+					if (estimated_total < static_cast<size_t>(best_score_.inlier_number * 0.9)) {
+						return gcransac::Score();  // Won't beat best, stop counting
+					}
+				}
+
+				// Original early termination check (if remaining points + current inliers < best)
 				if (point_number - point_idx + score.inlier_number < best_score_.inlier_number)
 					return gcransac::Score();
 			}
