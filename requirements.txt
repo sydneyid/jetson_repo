@@ -1,0 +1,17 @@
+# Python dependencies for Progressive-X
+# These are the Python packages needed to run the test scripts
+
+# Core scientific computing
+numpy>=1.20.0
+scipy>=1.7.0
+
+# Data handling
+h5py>=3.0.0
+
+# Visualization
+matplotlib>=3.3.0
+
+# Build dependencies (needed for building pyprogressivex)
+setuptools>=60.0.0
+wheel>=0.37.0
+pybind11>=2.9.0
