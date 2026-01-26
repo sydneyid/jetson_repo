@@ -1800,31 +1800,34 @@ int findLines3DDual_(
 		printf("Found %zu SPARSE lines from %zu unassigned points\n", num_sparse_lines, sparse_point_indices.size());
 
 	// Step 3: Merge results with mutual exclusivity
-	// Progressive-X uses 0-indexed labels: 0, 1, 2, 3... where 0, 1, ..., num_models-1 are models
-	// Initialize all as unassigned (will be set below)
+	// Labeling scheme: 0 = outliers, 1, 2, 3, ... = lines
+	// Initialize all as outliers (label 0)
 	labeling.resize(num_tents, 0);
 	
-	// Assign dense line labels (0-indexed: 0, 1, 2, ..., num_dense_lines-1)
+	// Assign dense line labels (offset by 1: lines are 1, 2, 3, ..., num_dense_lines)
+	// Progressive-X dense detection uses 0-indexed: 0, 1, 2, ..., num_dense_lines-1
+	// We map these to: 1, 2, 3, ..., num_dense_lines
 	for (size_t i = 0; i < num_tents; ++i)
 	{
-		// If point is assigned to a dense line (label < num_dense_lines), keep the label
+		// If point is assigned to a dense line (label < num_dense_lines), map to 1-indexed
 		if (labeling_dense[i] < num_dense_lines)
 		{
-			labeling[i] = labeling_dense[i]; // Keep 0-indexed dense label
+			labeling[i] = labeling_dense[i] + 1; // Map 0-indexed dense label to 1-indexed (1, 2, 3, ...)
 		}
 	}
 
-	// Assign sparse line labels (offset by num_dense_lines)
-	// Sparse labels in relative space: 0, 1, 2, ... (0-indexed)
-	// Map to global: num_dense_lines, num_dense_lines+1, num_dense_lines+2, ...
+	// Assign sparse line labels (offset by num_dense_lines + 1)
+	// Sparse labels in relative space: 0, 1, 2, ... (0-indexed from sparse detection)
+	// Map to global: num_dense_lines + 1, num_dense_lines + 2, num_dense_lines + 3, ...
 	for (size_t sparse_idx = 0; sparse_idx < sparse_point_indices.size(); ++sparse_idx)
 	{
 		// If point is assigned to a sparse line (label < num_sparse_lines in relative space)
 		if (labeling_sparse_relative[sparse_idx] < num_sparse_lines)
 		{
 			size_t original_idx = sparse_point_indices[sparse_idx];
-			// Map sparse label (0, 1, 2...) to global label (num_dense_lines, num_dense_lines+1, ...)
-			labeling[original_idx] = num_dense_lines + labeling_sparse_relative[sparse_idx];
+			// Map sparse label (0, 1, 2...) to global label (num_dense_lines + 1, num_dense_lines + 2, ...)
+			// Note: +1 because dense lines already use 1, 2, ..., num_dense_lines
+			labeling[original_idx] = num_dense_lines + labeling_sparse_relative[sparse_idx] + 1;
 		}
 	}
 

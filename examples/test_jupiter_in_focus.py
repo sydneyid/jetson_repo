@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Test Progressive-X Regular 3D Line Detection on May 9 HDF5 Event Data
-Reads events from may_9.hdf5 and treats (x, y, t) as a 3D point cloud to detect lines
+Test Progressive-X Regular 3D Line Detection on Jupiter HDF5 Event Data
+Reads events from jupiter.hdf5 and treats (x, y, t) as a 3D point cloud to detect lines
 Uses regular 3D line detection (findLines3D) instead of temporal version
 
-IMPORTANT: Due to a gflags conflict in conda environments, you MUST run this script with:
-    python test_may9_events_3d_regular.py 2>/dev/null
 """
 
 import numpy as np
@@ -17,6 +15,8 @@ import h5py
 from time import time
 import warnings
 from scipy.spatial.distance import cdist
+import matplotlib
+import matplotlib.colors
 
 # Add parent directory to path to import pyprogressivex
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -87,6 +87,8 @@ def read_hdf5_events(hdf5_path, time_window=0.1, events_constraint=None, start_t
         # Filter by time window
         if start_time is None:
             start_time = t.min()
+        else :
+            start_time = int(start_time * 1e6)  # Convert to microseconds
         
         end_time = start_time + time_window * 1e6  # Convert to microseconds
         time_mask = (t >= start_time) & (t < end_time)
@@ -224,7 +226,7 @@ def main():
         # - time_window: Increase (e.g., 0.1) to include more events
         # - events_constraint: Increase (e.g., 1000) to use more events
         # - start_time: Change to analyze different time period
-        points_raw, metadata = read_hdf5_events(hdf5_path, time_window=0.05, events_constraint = 500,start_time=None)
+        points_raw, metadata = read_hdf5_events(hdf5_path, time_window=0.05, events_constraint = 500,start_time=14.06)
         print(f"   ✓ Loaded {len(points_raw)} events")
     except Exception as e:
         print(f"     Error reading HDF5 file: {e}")
@@ -291,51 +293,34 @@ def main():
     
     data_range = np.max(points_normalized.max(axis=0) - points_normalized.min(axis=0))
     
-    # ADJUSTED FOR SPARSE LINE: More permissive threshold to catch sparse line points
-    # Dense line can handle stricter threshold, but sparse line needs more tolerance
-    threshold_from_range = data_range * 0.001  # Increased from 0.0005 to 0.001 for sparse line
-    threshold_from_noise = estimated_noise * 1.0  # Increased from 0.8 to 1.0 for sparse line
-    final_threshold = max(threshold_from_range, threshold_from_noise)
-    final_threshold = max(final_threshold, data_range * 0.0003)  # Minimum 0.03% of range
-    final_threshold = min(final_threshold, data_range * 0.015)  # Increased max from 0.008 to 0.015 for sparse line
+    # Calculate base threshold - balanced for both dense and sparse detection
+    # Dense lines will use a stricter version, sparse lines will use a more permissive version
+    # Slightly more permissive to catch lines that might be missed
+    threshold_from_range = data_range * 0.001  # Slightly more permissive (was 0.0008)
+    threshold_from_noise = estimated_noise * 1.0  # Slightly more permissive (was 0.9)
+    base_threshold = max(threshold_from_range, threshold_from_noise)
+    base_threshold = max(base_threshold, data_range * 0.0003)  # Minimum 0.03% of range
+    base_threshold = min(base_threshold, data_range * 0.012)  # Increased max cap slightly (was 0.010)
     
     # Neighborhood radius: scaled to data range (smaller to allow more distinct lines)
     neighbor_radius = data_range * 0.002  # 0.2% of range (smaller to allow more distinct lines)
     neighbor_radius = max(neighbor_radius, estimated_noise * 0.15)
     neighbor_radius = min(neighbor_radius, data_range * 0.010)
     
-    # ADJUSTABLE: Minimum points per line
-    # To find MORE lines: Decrease (e.g., 5 or 8) to allow sparse lines
-    # To find only STRONG lines: Increase (e.g., 15 or 20)
-    minimum_point_number = 5  # Minimum 10 inliers - allows finding more lines while still filtering weak proposals
+
+    minimum_point_number = 10  # Minimum 10 inliers - allows finding more lines while still filtering weak proposals
     
     print(f"   ✓ Estimated noise: {estimated_noise:.6f}")
-    print(f"   ✓ Threshold: {final_threshold:.6f} ({100*final_threshold/data_range:.2f}% of range)")
+    print(f"   ✓ Base threshold: {base_threshold:.6f} ({100*base_threshold/data_range:.2f}% of range)")
     print(f"   ✓ Neighborhood radius: {neighbor_radius:.6f}")
     print(f"   ✓ Minimum points per model: {minimum_point_number}")
     
-    # Run Progressive-X Regular 3D line detection (NO temporal constraint)
-    # STRATEGY FOR DENSE + SPARSE LINE:
-    # - More permissive threshold: sparse line points may be further from ideal line
-    # - Lower confidence: more thorough search to find sparse line
-    # - More iterations: sparse line needs more samples to be discovered
-    # - Lower Tanimoto similarity: prevent sparse line from merging with dense line
-    # - Lower minimum points: sparse line has fewer points
     print("\n5. Running Progressive-X Regular 3D line detection (no temporal constraint)...")
     
-    # Restore to working variant settings that produced ~18 lines:
-    # - Low confidence (0.05) to find many models
-    # - Higher max_iters to test more samples (decent number relative to total)
+
     n_points = len(points_normalized)
 
-    # max_iters controls max RANSAC iterations PER PROPOSAL (not total)
-    # OPTIMIZED: Scale with point count - fewer points need fewer samples
-    # With Z-aligned sampler, proposals succeed faster, so we don't need extremely high values
-    # Formula: Scale proportionally to point count, with minimum threshold for small datasets
-    # For 7000 points: 3000 iterations (baseline)
-    # For 1600 points: ~700 iterations (proportional scaling)
-    # OPTIMIZED: Increased max_iters to find more lines
-    # More iterations per proposal = better chance of finding all lines
+
     if n_points < 2000:
         # ADJUSTED FOR SPARSE LINE: More iterations to find sparse line
         max_iters_optimized = max(1000, int(n_points * 1.0))  # Increased from 500/0.5 to 1000/1.0 for sparse line
@@ -351,13 +336,14 @@ def main():
     
     print(f"   Using max_iters={max_iters_optimized:,} (scaled from {n_points:,} points)")
     
-    # ADJUSTED FOR SPARSE LINE: Lower confidence for thorough search to find sparse line
-    # Sparse lines need more iterations to be discovered
-    conf_optimized = 0.02  # Lowered from 0.05 to 0.02 for thorough search of sparse line
+    # Use higher confidence for dense line detection to ensure thorough search
+    # Dense lines should be found reliably, then sparse lines can use remaining points
+    conf_dense = 0.05  # Higher confidence for dense lines to ensure all are found
+    conf_sparse = 0.02  # Lower confidence for sparse lines (more permissive search)
     sampler_id_optimized = 3  # Z-Aligned sampler - samples points with similar X,Y but different Z (ideal for lines parallel to time axis)
     
-    print(f"   Settings: conf={conf_optimized} (moderate for speed), sampler=Z-Aligned (for time-parallel lines), max_iters={max_iters_optimized:,}")
-    print(f"   → Early termination: stops at 30-35 models to allow finding more lines")
+    print(f"   Settings: conf_dense={conf_dense}, conf_sparse={conf_sparse}, sampler=Z-Aligned (for time-parallel lines), max_iters={max_iters_optimized:,}")
+    print(f"   → Dense detection uses higher confidence to find all dense lines first")
     
     try:
         t = time()
@@ -367,23 +353,28 @@ def main():
         sys.stdout = sys.__stdout__  # Use unbuffered stdout
         
         # DUAL DETECTION: Detect both dense and sparse lines with mutual exclusivity
-        # Dense lines use stricter threshold, sparse lines use more permissive threshold
-        threshold_dense = final_threshold  # Stricter for dense lines
-        threshold_sparse = final_threshold * 3.0  # More permissive for sparse lines (3x threshold, was 2x)
+        # Dense lines: use slightly relaxed threshold (0.9x base) to catch all dense lines including potentially weaker ones
+        # Sparse lines: use more permissive threshold (2.5x base) to catch sparse/noisy lines
+        # Key: Slightly relax dense threshold to catch lines that might be borderline
+        threshold_dense = base_threshold * 0.9  # Slightly relaxed (90% of base) to catch borderline dense lines
+        threshold_sparse = base_threshold * 2.5  # More permissive for sparse lines (2.5x base)
         minimum_point_number_sparse = max(3, minimum_point_number // 2)  # Lower minimum for sparse lines (half of dense)
         
-        print(f"   Dense line detection: threshold={threshold_dense:.6f}, min_points={minimum_point_number}")
-        print(f"   Sparse line detection: threshold={threshold_sparse:.6f}, min_points={minimum_point_number_sparse}")
+        print(f"   Dense line detection: threshold={threshold_dense:.6f} ({100*threshold_dense/data_range:.2f}% of range), min_points={minimum_point_number}")
+        print(f"   Sparse line detection: threshold={threshold_sparse:.6f} (permissive, {100*threshold_sparse/data_range:.2f}% of range), min_points={minimum_point_number_sparse}")
         
+        # Note: findLines3DDual uses a single conf parameter for both stages
+        # We'll use conf_dense for the dense stage, but the sparse stage will also use it
+        # The key is that dense detection happens first with stricter threshold
         lines, labeling, line_types = pyprogressivex.findLines3DDual(
             np.ascontiguousarray(points_normalized, dtype=np.float64),
             np.ascontiguousarray([], dtype=np.float64),  # No weights
             threshold_dense=threshold_dense,
             threshold_sparse=threshold_sparse,
-            conf=conf_optimized,
+            conf=conf_dense,  # Use higher confidence for dense detection (sparse will also use this)
             spatial_coherence_weight=0.0,
             neighborhood_ball_radius=neighbor_radius,
-            maximum_tanimoto_similarity=0.30,  # Lower to prevent merging
+            maximum_tanimoto_similarity=0.35,  # Increased from 0.25 to 0.35 to prevent duplicate detections at same location
             max_iters=max_iters_optimized,
             minimum_point_number_dense=minimum_point_number,
             minimum_point_number_sparse=minimum_point_number_sparse,
@@ -420,56 +411,124 @@ def main():
         print(f"      - Model validation: ~{elapsed_time*0.07:.2f}s (7%)")
         print(f"      - Compound model update: ~{elapsed_time*0.03:.2f}s (3%)")
         
-        # Check if labels are 0-indexed (before filtering)
-        use_zero_indexed = False
-        if num_models > 0:
-            label0_mask = (labeling == 0)
-            if np.sum(label0_mask) > minimum_point_number:
-                points_label0 = points_normalized[label0_mask]
-                if len(points_label0) >= 2:
-                    centroid = points_label0.mean(axis=0)
-                    centered = points_label0 - centroid
-                    U, s, Vt = np.linalg.svd(centered, full_matrices=False)
-                    line_dir = Vt[0]
-                    line_dir = line_dir / np.linalg.norm(line_dir)
-                    distances_label0 = [point_to_line_distance_3d(p, centroid, line_dir) for p in points_label0]
-                    inlier_ratio_label0 = np.sum(np.array(distances_label0) <= final_threshold) / len(distances_label0)
-                    if inlier_ratio_label0 > 0.6:
-                        use_zero_indexed = True
-                        print(f"   ✓ Using 0-indexed interpretation: label 0 = first model")
+        # Labeling scheme (after C++ fix): 
+        # - Label 0 = outliers/unassigned points
+        # - Labels 1, 2, 3, ..., num_models = lines (dense first, then sparse)
+        # - Dense lines: labels 1, 2, ..., num_dense
+        # - Sparse lines: labels num_dense+1, num_dense+2, ..., num_models
+        # Mapping: line index idx -> label idx + 1
         
+        # Verify the labeling structure
+        unique_labels = np.unique(labeling)
+        print(f"\n   🔍 Labeling structure verification:")
+        print(f"      Total models: {num_models} (dense: {num_dense}, sparse: {num_sparse})")
+        print(f"      Unique labels in labeling: {sorted(unique_labels)}")
+        print(f"      Expected: label 0 = outliers, labels 1-{num_models} = lines")
         
-        # FILTER: Remove lines that aren't parallel to time axis (for event data)
-        # Lines should be parallel to Z (time) axis, so direction should be close to (0, 0, 1)
-        print(f"\n   Filtering: Removing non-parallel lines (must be parallel to time axis)...")
-        expected_direction = np.array([0.0, 0.0, 1.0])  # Time axis direction
-        parallel_valid_indices = []
-        # More lenient threshold: 10° = cos(10°) ≈ 0.9848 (was 5°, trying 10° to keep more lines)
-        parallel_threshold = np.cos(np.deg2rad(1.0))  # Lines must be within 10° of time axis
-        
-        # Iterate over all detected lines
-        for idx in range(num_models):
-            line_dir = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
-            line_dir = line_dir / np.linalg.norm(line_dir)
-            
-            # Check if line is parallel to time axis
-            dot_with_time = np.abs(np.dot(line_dir, expected_direction))
-            angle_with_time = np.arccos(np.clip(dot_with_time, -1, 1)) * 180 / np.pi
-            
-            if dot_with_time >= parallel_threshold:
-                parallel_valid_indices.append(idx)
+        # Check label distribution
+        for label in sorted(unique_labels):
+            if label == 0:
+                mask = (labeling == label)
+                point_count = np.sum(mask)
+                print(f"      Label {label} (OUTLIERS): {point_count} points")
+            elif label >= 1 and label <= num_models:
+                mask = (labeling == label)
+                point_count = np.sum(mask)
+                # Map label to line index: label 1 -> line 0, label 2 -> line 1, etc.
+                line_idx = int(label - 1)
+                if line_idx >= 0 and line_idx < len(line_types):
+                    line_type_str = "DENSE" if line_types[line_idx] == 0 else "SPARSE"
+                    print(f"      Label {label} ({line_type_str} line {line_idx+1}): {point_count} points")
+                else:
+                    print(f"      Label {label}: {point_count} points (line_idx {line_idx} out of range!)")
             else:
-                print(f"   ✗ Removed line {idx+1}: not parallel to time axis (angle={angle_with_time:.1f}°, threshold=10.0°)")
+                mask = (labeling == label)
+                point_count = np.sum(mask)
+                print(f"      Label {label} (unexpected): {point_count} points")
         
-        # ADJUSTABLE: Parallelism threshold (degrees from time axis)
-        # ADJUSTED FOR SPARSE LINE: Slightly more lenient to ensure sparse line passes
-        # To find MORE lines: Increase (e.g., 2.0 or 5.0) to allow lines slightly off time axis
-        # To find only PERFECTLY parallel lines: Decrease (e.g., 0.5)
-        valid_line_indices = parallel_check(lines, labeling, num_models, parallel_threshold=2.0, print_updates=True)
+        # Print all detected lines before filtering (for debugging) - after determining indexing
+        print(f"\n   🔍 All detected lines (before parallel filtering):")
+        for idx in range(num_models):
+            # Map line index to label: line idx -> label idx + 1 (label 0 is outliers)
+            instance_label = idx + 1
+            mask = (labeling == instance_label)
+            points_line = points_normalized[mask]
+            point_count = np.sum(mask)
+            if point_count > 0:
+                centroid_x = np.mean(points_line[:, 0])
+                centroid_y = np.mean(points_line[:, 1])
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                line_type_str = "DENSE" if line_type == 0 else "SPARSE"
+                line_dir = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
+                line_dir = line_dir / np.linalg.norm(line_dir)
+                expected_direction = np.array([0.0, 0.0, 1.0])
+                dot_with_time = np.abs(np.dot(line_dir, expected_direction))
+                angle_with_time = np.arccos(np.clip(dot_with_time, -1, 1)) * 180 / np.pi
+                
+                # Verify points are actually close to the line
+                line_point = np.array([lines[idx, 0], lines[idx, 1], lines[idx, 2]])
+                threshold_used = threshold_dense if line_type == 0 else threshold_sparse
+                distances = np.array([point_to_line_distance_3d(p, line_point, line_dir) for p in points_line])
+                inlier_count = np.sum(distances <= threshold_used)
+                inlier_ratio = inlier_count / len(points_line) if len(points_line) > 0 else 0
+                
+                print(f"      Line {idx+1} ({line_type_str}, label={instance_label}): {point_count} points, "
+                      f"centroid=({centroid_x:.1f}, {centroid_y:.1f}), angle={angle_with_time:.2f}°, "
+                      f"inlier_ratio={inlier_ratio:.2%} ({inlier_count}/{point_count} within threshold {threshold_used:.6f})")
         
-        print(f"   ✓ Kept {len(valid_line_indices)} parallel lines out of {len(parallel_valid_indices)} time-axis-parallel lines")
+        # Count points assigned to each type (after determining indexing)
+        dense_point_count = 0
+        sparse_point_count = 0
+        for idx in range(num_models):
+            # Map line index to label: line idx -> label idx + 1 (label 0 is outliers)
+            instance_label = idx + 1
+            mask = (labeling == instance_label)
+            point_count = np.sum(mask)
+            if idx < len(line_types):
+                if line_types[idx] == 0:  # Dense
+                    dense_point_count += point_count
+                else:  # Sparse
+                    sparse_point_count += point_count
         
+        print(f"   📊 Point assignment: {dense_point_count} points in dense lines, {sparse_point_count} points in sparse lines")
+        
+        # Check for unassigned points in the top-right region (around 1200, 600)
+        # Unassigned points: label 0 (outliers) OR label > num_models
+        unassigned_mask = (labeling == 0) | (labeling > num_models)
+        
+        unassigned_points = points_normalized[unassigned_mask]
+        if len(unassigned_points) > 0:
+            # Check top-right region (x > 1000, y > 500)
+            top_right_mask = (unassigned_points[:, 0] > 1000) & (unassigned_points[:, 1] > 500)
+            top_right_unassigned = unassigned_points[top_right_mask]
+            print(f"   📍 Unassigned points in top-right region (x>1000, y>500): {len(top_right_unassigned)} out of {len(unassigned_points)} unassigned total")
+            if len(top_right_unassigned) > 10:
+                print(f"      → Potential missed line in top-right region with {len(top_right_unassigned)} unassigned points")
+        
+        # More lenient threshold: 10° = cos(10°) ≈ 0.9848 (was 5°, trying 10° to keep more lines)
+        parallel_threshold = 1.0  # Lines must be within 10° of time axis
 
+        valid_line_indices = parallel_check(lines,labeling,num_models , parallel_threshold = 1.0,print_updates=True )
+        
+        # Print info about filtered lines
+        all_indices = set(range(num_models))
+        filtered_indices = all_indices - set(valid_line_indices)
+        if len(filtered_indices) > 0:
+            print(f"   ⚠️  {len(filtered_indices)} lines filtered out by parallel check:")
+            for idx in filtered_indices:
+                line_dir = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
+                line_dir = line_dir / np.linalg.norm(line_dir)
+                expected_direction = np.array([0.0, 0.0, 1.0])
+                dot_with_time = np.abs(np.dot(line_dir, expected_direction))
+                angle_with_time = np.arccos(np.clip(dot_with_time, -1, 1)) * 180 / np.pi
+                # Dual detection always uses 0-indexed
+                instance_label = idx
+                mask = (labeling == instance_label)
+                point_count = np.sum(mask)
+                centroid_x = np.mean(points_normalized[mask, 0]) if point_count > 0 else 0
+                centroid_y = np.mean(points_normalized[mask, 1]) if point_count > 0 else 0
+                print(f"      Line {idx+1} (label={instance_label}): angle={angle_with_time:.2f}°, points={point_count}, centroid=({centroid_x:.1f}, {centroid_y:.1f})")
+        
         # Visualization
         print("\n4. Visualizing results...")
         
@@ -489,48 +548,121 @@ def main():
         ax2 = fig.add_subplot(132, projection='3d')
         colors_det = plt.cm.tab10(np.linspace(0, 1, len(valid_line_indices)))
         
+
+        # Draw detected lines in 3D
         for i, idx in enumerate(valid_line_indices):
-            if use_zero_indexed:
-                instance_label = idx
-            else:
-                instance_label = idx + 1
-            mask = (labeling == instance_label)
-            points_line = points_normalized[mask]
-            if len(points_line) > 0:
-                # Color by line type: dense = solid, sparse = lighter/transparent
-                line_type = line_types[idx] if idx < len(line_types) else 0
-                if line_type == 0:  # Dense line
-                    ax2.scatter(points_line[:, 0], points_line[:, 1], points_line[:, 2],
-                               c=[colors_det[i]], s=5, alpha=0.6, label=f'Dense {i+1}')
-                else:  # Sparse line
-                    ax2.scatter(points_line[:, 0], points_line[:, 1], points_line[:, 2],
-                               c=[colors_det[i]], s=3, alpha=0.4, marker='^', label=f'Sparse {i+1}')
-        
-        # Draw detected lines
-        for i, idx in enumerate(valid_line_indices):
+            # Get the line parameters
             line_point = np.array([lines[idx, 0], lines[idx, 1], lines[idx, 2]])
+            
             line_dir = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
             line_dir = line_dir / np.linalg.norm(line_dir)
             
-            # Find extent of points on this line
-            if use_zero_indexed:
-                instance_label = idx
-            else:
-                instance_label = idx + 1
+            # For dual detection, labels are 0-indexed: line index idx corresponds to label idx
+            instance_label = idx  # Always 0-indexed for dual detection
             mask = (labeling == instance_label)
             points_line = points_normalized[mask]
+            
+            # Diagnostic: verify the points actually belong to this line
             if len(points_line) > 0:
+                # Check distances from points to line
+                distances = np.array([point_to_line_distance_3d(p, line_point, line_dir) for p in points_line])
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                threshold_used = threshold_dense if line_type == 0 else threshold_sparse
+                inliers = np.sum(distances <= threshold_used)
+                inlier_ratio = inliers / len(points_line) if len(points_line) > 0 else 0
+                
+                # Calculate centroid of assigned points
+                centroid = np.mean(points_line, axis=0)
+                
+                print(f"   Line {idx+1} (type={'DENSE' if line_type==0 else 'SPARSE'}, label={instance_label}): {len(points_line)} points, {inliers} within threshold {threshold_used:.6f} ({inlier_ratio:.2%})")
+                print(f"      Line point: {line_point}, direction: {line_dir}")
+                print(f"      Points centroid: {centroid}")
+                print(f"      Mean distance: {np.mean(distances):.6f}, Max distance: {np.max(distances):.6f}")
+                
+                # Warn if there's a significant mismatch
+                if inlier_ratio < 0.7:
+                    print(f"      ⚠️  WARNING: Only {inlier_ratio:.1%} of points are within threshold! Possible mislabeling.")
+                    # Check if line point is far from centroid
+                    spatial_dist = np.linalg.norm(line_point[:2] - centroid[:2])
+                    if spatial_dist > 50:  # More than 50 pixels away
+                        print(f"      ⚠️  WARNING: Line point ({line_point[0]:.1f}, {line_point[1]:.1f}) is {spatial_dist:.1f} pixels from points centroid ({centroid[0]:.1f}, {centroid[1]:.1f})")
+                    
+                    # Check if these points might belong to other lines
+                    print(f"      🔍 Checking if mislabeled points belong to other lines:")
+                    found_better = False
+                    for other_idx in range(num_models):
+                        if other_idx != idx and other_idx < len(lines):
+                            other_line_point = np.array([lines[other_idx, 0], lines[other_idx, 1], lines[other_idx, 2]])
+                            other_line_dir = np.array([lines[other_idx, 3], lines[other_idx, 4], lines[other_idx, 5]])
+                            other_line_dir = other_line_dir / np.linalg.norm(other_line_dir)
+                            other_line_type = line_types[other_idx] if other_idx < len(line_types) else 0
+                            other_threshold = threshold_dense if other_line_type == 0 else threshold_sparse
+                            
+                            # Check how many of these points would be inliers for the other line
+                            other_distances = np.array([point_to_line_distance_3d(p, other_line_point, other_line_dir) for p in points_line])
+                            other_inliers = np.sum(other_distances <= other_threshold)
+                            if other_inliers > inliers:  # More points fit the other line better
+                                print(f"         → {other_inliers} points would be inliers for Line {other_idx+1} ({'DENSE' if other_line_type==0 else 'SPARSE'}, threshold {other_threshold:.6f}) vs {inliers} for current line")
+                                found_better = True
+                    
+                    if not found_better:
+                        print(f"         → No other detected line fits these points better")
+                        print(f"         → This suggests Line {idx+1}'s parameters may be incorrect, or points form multiple clusters")
+                        
+                        # Check if points form multiple spatial clusters
+                        if len(points_line) >= 4:
+                            try:
+                                from sklearn.cluster import KMeans
+                                # Try 2 clusters
+                                kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+                                clusters = kmeans.fit_predict(points_line[:, :2])  # Use only x, y
+                                cluster_sizes = [np.sum(clusters == i) for i in range(2)]
+                                cluster_centers = kmeans.cluster_centers_
+                                print(f"         → Points form 2 spatial clusters: sizes {cluster_sizes}, centers at {cluster_centers}")
+                            except ImportError:
+                                print(f"         → (sklearn not available for cluster analysis)")
+                            except Exception as e:
+                                print(f"         → Could not analyze clusters: {e}")
+                        
+                        # Try recomputing line from actual points to see if it matches better
+                        if len(points_line) >= 2:
+                            try:
+                                # Fit line through actual points using PCA
+                                centroid_actual = np.mean(points_line, axis=0)
+                                centered = points_line - centroid_actual
+                                U, s, Vt = np.linalg.svd(centered, full_matrices=False)
+                                recomputed_dir = Vt[0]  # Principal direction
+                                recomputed_dir = recomputed_dir / np.linalg.norm(recomputed_dir)
+                                
+                                # Check distances with recomputed line
+                                recomputed_distances = np.array([point_to_line_distance_3d(p, centroid_actual, recomputed_dir) for p in points_line])
+                                recomputed_inliers = np.sum(recomputed_distances <= threshold_used)
+                                recomputed_mean_dist = np.mean(recomputed_distances)
+                                
+                                print(f"         → Recomputing line from points: {recomputed_inliers}/{len(points_line)} inliers, mean distance {recomputed_mean_dist:.2f}")
+                                print(f"         → Original line: {inliers}/{len(points_line)} inliers, mean distance {np.mean(distances):.2f}")
+                                if recomputed_inliers > inliers:
+                                    print(f"         → ⚠️  Recomputed line fits MUCH better! Original line parameters may be wrong.")
+                            except Exception as e:
+                                print(f"         → Could not recompute line: {e}")
+            if len(points_line) > 0:
+                # Project points onto the line to find extent
                 projections = np.array([np.dot(p - line_point, line_dir) for p in points_line])
                 t_min, t_max = projections.min(), projections.max()
-                p_start = line_point + t_min * line_dir
-                p_end = line_point + t_max * line_dir
+                # Extend slightly beyond the points for better visualization
+                t_range = t_max - t_min
+                t_min_extended = t_min - 0.1 * t_range if t_range > 0 else t_min - 1.0
+                t_max_extended = t_max + 0.1 * t_range if t_range > 0 else t_max + 1.0
+                p_start = line_point + t_min_extended * line_dir
+                p_end = line_point + t_max_extended * line_dir
                 line_type = line_types[idx] if idx < len(line_types) else 0
-                if line_type == 0:  # Dense line
-                    ax2.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], [p_start[2], p_end[2]],
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                # if line_type == 0:  # Dense line
+                ax2.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], [p_start[2], p_end[2]],
                             'k-', linewidth=2, alpha=0.5)
-                else:  # Sparse line
-                    ax2.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], [p_start[2], p_end[2]],
-                            'k--', linewidth=1.5, alpha=0.3)
+                ax2.scatter(points_line[:, 0], points_line[:, 1], points_line[:, 2],
+                               c=[colors_det[i]], s=5, alpha=0.6) #, label=f'Dense {i+1}')
+
         
         ax2.set_xlabel('X (pixels)')
         ax2.set_ylabel('Y (pixels)')
@@ -538,10 +670,9 @@ def main():
         ax2.set_ylim(0,720)
         ax2.set_zlabel('Time (normalized)')
         ax2.set_title(f'Detected Lines ({len(valid_line_indices)} lines)')
-        ax2.legend(loc='upper right', fontsize=8)
         # Put a legend below current axis
         ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
-                fancybox=True, shadow=True, ncol=5)
+                fancybox=True, shadow=True, ncol=5,fontsize=8,markerscale=2)
         
         # Plot 3: Detected lines projected to (x, y) space
         ax3 = fig.add_subplot(133)
@@ -550,19 +681,20 @@ def main():
         ax3.scatter(points_normalized[:, 0], points_normalized[:, 1], c='lightgray', s=1, alpha=0.3)
         
         # Plot detected lines (color by type)
+        line_type_lists=[]
         for i, idx in enumerate(valid_line_indices):
-            if use_zero_indexed:
-                instance_label = idx
-            else:
-                instance_label = idx + 1
+                # Map line index to label: line idx -> label idx + 1 (label 0 is outliers)
+            instance_label = idx + 1
             mask = (labeling == instance_label)
             points_line = points_normalized[mask]
             if len(points_line) > 0:
                 line_type = line_types[idx] if idx < len(line_types) else 0
                 if line_type == 0:  # Dense line
                     ax3.scatter(points_line[:, 0], points_line[:, 1], c=[colors_det[i]], s=5, alpha=0.6, label=f'Dense {i+1}')
+                    line_type_lists.append(0)
                 else:  # Sparse line
                     ax3.scatter(points_line[:, 0], points_line[:, 1], c=[colors_det[i]], s=3, alpha=0.4, marker='^', label=f'Sparse {i+1}')
+                    line_type_lists.append(1)
             
             # Draw line in 2D projection (dense = solid, sparse = dashed)
             line_point = np.array([lines[idx, 0], lines[idx, 1], lines[idx, 2]])
@@ -570,11 +702,8 @@ def main():
             line_dir = line_dir / np.linalg.norm(line_dir)
             
             # Project line to 2D (x, y) plane
-            # Find extent
-            if use_zero_indexed:
-                instance_label = idx
-            else:
-                instance_label = idx + 1
+            # Find extent - dual detection always uses 0-indexed
+            instance_label = idx
             mask = (labeling == instance_label)
             points_line = points_normalized[mask]
             if len(points_line) > 0:
@@ -591,7 +720,8 @@ def main():
         ax3.set_xlabel('X (pixels)')
         ax3.set_ylabel('Y (pixels)')
         ax3.set_title('Detected Lines (X-Y Projection)')
-        ax3.legend(loc='upper right', fontsize=8)
+        ax3.legend(loc='upper center', bbox_to_anchor=(0.5, -0.25),
+                fancybox=True, shadow=True, ncol=5,fontsize=8,markerscale=2)
         ax3.set_aspect('equal')
         
         plt.tight_layout()
@@ -621,8 +751,6 @@ def main():
         y_coords = points_raw[:, 1].astype(int)
         
         
-        # Use np.add.at to accumulate events at specific pixel locations
-        # Note: y-coordinate is flipped (height - 1 - y) to match image coordinate system
         np.add.at(accumulated_frame, (y_coords, x_coords), 1)
         
         print(f"   Accumulated frame range: [{accumulated_frame.min():.1f}, {accumulated_frame.max():.1f}]")
@@ -631,24 +759,20 @@ def main():
         # Calculate line centroids (average x, y of points on each line)
         line_centroids = []
         for i, idx in enumerate(valid_line_indices):
-            if use_zero_indexed:
-                instance_label = idx
-            else:
-                instance_label = idx + 1
+                # Map line index to label: line idx -> label idx + 1 (label 0 is outliers)
+            instance_label = idx + 1
             mask = (labeling == instance_label)
             points_line = points_normalized[mask]
             
             if len(points_line) > 0:
-                # Get original (non-normalized) x, y coordinates for centroid
-                # Since normalization only affects time (z), x and y are the same
+
                 centroid_x = np.mean(points_line[:, 0])
                 centroid_y = np.mean(points_line[:, 1])
-                # No y-flip needed since np.add.at uses (y_coords, x_coords) directly
                 line_centroids.append((centroid_x, centroid_y, i+1))
+                
         
         # Create new figure for heatmap
-        import matplotlib
-        import matplotlib.colors
+
         fig2 = plt.figure(figsize=(12, 8))
         ax_heatmap = fig2.gca()
         
@@ -669,6 +793,7 @@ def main():
         cbar = plt.colorbar(im, ax=ax_heatmap, label='Event Accumulation (1 = no events)')
 
 
+        print('line centroids is '+str(line_centroids)+ ' and the line list for annotaiton is '+str(line_type_lists))
         # Superimpose line centroids
         if line_centroids:
             centroids_x = [c[0] for c in line_centroids]
@@ -679,11 +804,21 @@ def main():
             ax_heatmap.scatter(centroids_x, centroids_y, c='cyan', s=100, 
                              marker='x', linewidths=2, label='Line Centroids', alpha=0.1,zorder=10)
             
+            
+            
             # Add text labels for line numbers
             for x, y, num in line_centroids:
-                ax_heatmap.annotate(f'L{num}', (x, y), xytext=(5, 5), 
+                
+                if line_type_lists[num-1] ==0: # dense
+                    ax_heatmap.annotate(f'Dense L{num}', (x, y), xytext=(5, 5), 
                                   textcoords='offset points', color='cyan', 
                                   fontsize=8, fontweight='bold', zorder=11)
+                else: # sparse
+                    ax_heatmap.annotate(f'Sparse L{num}', (x, y), xytext=(5, 5), 
+                                  textcoords='offset points', color='cyan', 
+                                  fontsize=8, fontweight='bold', zorder=11)
+                
+
         
         ax_heatmap.set_xlabel('X (pixels)')
         ax_heatmap.set_ylabel('Y (pixels)')
@@ -693,7 +828,7 @@ def main():
         ax_heatmap.legend(loc='upper right')
         
         plt.tight_layout()
-        output_path_heatmap = 'may9_events_heatmap_centroids.png'
+        output_path_heatmap = 'jupiter_events_heatmap_centroids.png'
         # plt.savefig(output_path_heatmap, dpi=150, bbox_inches='tight')
         plt.show()
         # print(f"   ✓ Saved heatmap visualization to {output_path_heatmap}")

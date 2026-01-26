@@ -44,7 +44,7 @@ finally:
     except:
         pass
 
-def read_hdf5_events(hdf5_path, time_window=0.1, start_time=None):
+def read_hdf5_events(hdf5_path, time_window=0.1, events_constraint=None, start_time=None):
     """
     Read events from HDF5 file and create 3D point cloud from (x, y, t)
     
@@ -88,6 +88,8 @@ def read_hdf5_events(hdf5_path, time_window=0.1, start_time=None):
         # Filter by time window
         if start_time is None:
             start_time = t.min()
+        else :
+            start_time = int(start_time * 1e6)  # Convert to microseconds
         
         end_time = start_time + time_window * 1e6  # Convert to microseconds
         time_mask = (t >= start_time) & (t < end_time)
@@ -103,7 +105,15 @@ def read_hdf5_events(hdf5_path, time_window=0.1, start_time=None):
         x_filtered = x_filtered[p_mask]
         y_filtered = y_filtered[p_mask]
         t_filtered = t_filtered[p_mask]   
-        # p_filtered = p_filtered[time_mask] 
+        p_filtered = p_filtered[p_mask] 
+
+        if events_constraint is not None and len(x_filtered) > events_constraint:
+            # Downsample events to meet the constraint
+            x_filtered = x_filtered[0:events_constraint]
+            y_filtered = y_filtered[0:events_constraint]
+            t_filtered = t_filtered[0:events_constraint]
+            p_filtered = p_filtered[0:events_constraint]
+
         
         print(f"  Time range: {t.min()/1e6:.3f}s to {t.max()/1e6:.3f}s (duration: {(t.max()-t.min())/1e6:.3f}s)")
         print(f"  Spatial range: X=[{x.min()}, {x.max()}], Y=[{y.min()}, {y.max()}]")
@@ -206,6 +216,7 @@ def main():
     
     # Read HDF5 file
     hdf5_path = 'img/may_9.hdf5'
+    hdf5_path = '/Users/sydneydolan/Documents/may9_data/Jupiter_In_Focus.hdf5'
     
     if not os.path.exists(hdf5_path):
         print(f"  Error: File not found: {hdf5_path}")
