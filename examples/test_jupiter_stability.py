@@ -44,63 +44,23 @@ finally:
         pass
 
 
-def run_single_detection(hdf5_path, time_window=0.05, events_constraint=500, start_time=14.06, 
-                        threshold_dense=None, threshold_sparse=None, conf_dense=0.05,
+def run_single_detection(points_normalized, threshold_dense, threshold_sparse, conf_dense=0.05,
                         max_iters=1000, minimum_point_number=10, minimum_point_number_sparse=5,
                         neighbor_radius=None, maximum_tanimoto_similarity=0.35, sampler_id=3):
     """
-    Run a single detection and return results
+    Run a single detection on pre-processed points and return results
+    
+    Args:
+        points_normalized: Pre-normalized points (N×3 array)
+        threshold_dense: Threshold for dense lines
+        threshold_sparse: Threshold for sparse lines
+        ... (other parameters)
     
     Returns:
         dict with keys: num_models, num_dense, num_sparse, lines, line_types, labeling,
-                       valid_line_indices, points_normalized, metadata
+                       valid_line_indices
     """
-    # Read and normalize points
-    points_raw, metadata = read_hdf5_events(hdf5_path, time_window=time_window, 
-                                           events_constraint=events_constraint, 
-                                           start_time=start_time)
-    
-    # Normalize time coordinate
-    spatial_range = max(points_raw[:, 0].max() - points_raw[:, 0].min(),
-                       points_raw[:, 1].max() - points_raw[:, 1].min())
-    time_range = points_raw[:, 2].max() - points_raw[:, 2].min()
-    
-    if time_range > 0:
-        time_scale_factor = spatial_range / time_range
-    else:
-        time_scale_factor = 1e-6
-    
-    points_normalized, time_offset, time_scale = normalize_time_coordinate(
-        points_raw, time_scale_factor=time_scale_factor
-    )
-    
-    # Compute parameters if not provided
-    n_sample = min(100, len(points_normalized))
-    sample_indices = np.random.choice(len(points_normalized), n_sample, replace=False)
-    sample_points = points_normalized[sample_indices]
-    from scipy.spatial.distance import cdist
-    dists = cdist(sample_points, sample_points)
-    np.fill_diagonal(dists, np.inf)
-    nearest_dists = np.min(dists, axis=1)
-    estimated_noise = np.median(nearest_dists)
-    
-    data_range = np.max(points_normalized.max(axis=0) - points_normalized.min(axis=0))
-    
-    if threshold_dense is None:
-        threshold_from_range = data_range * 0.001
-        threshold_from_noise = estimated_noise * 1.0
-        base_threshold = max(threshold_from_range, threshold_from_noise)
-        base_threshold = max(base_threshold, data_range * 0.0003)
-        base_threshold = min(base_threshold, data_range * 0.012)
-        threshold_dense = base_threshold * 0.9
-        threshold_sparse = base_threshold * 2.5
-    
-    if neighbor_radius is None:
-        neighbor_radius = data_range * 0.002
-        neighbor_radius = max(neighbor_radius, estimated_noise * 0.15)
-        neighbor_radius = min(neighbor_radius, data_range * 0.010)
-    
-    # Run detection
+    # Run detection (points are already normalized)
     lines, labeling, line_types = pyprogressivex.findLines3DDual(
         np.ascontiguousarray(points_normalized, dtype=np.float64),
         np.ascontiguousarray([], dtype=np.float64),
@@ -137,11 +97,7 @@ def run_single_detection(hdf5_path, time_window=0.05, events_constraint=500, sta
         'lines': lines,
         'line_types': line_types,
         'labeling': labeling,
-        'valid_line_indices': valid_line_indices,
-        'points_normalized': points_normalized,
-        'metadata': metadata,
-        'threshold_dense': threshold_dense,
-        'threshold_sparse': threshold_sparse
+        'valid_line_indices': valid_line_indices
     }
 
 
