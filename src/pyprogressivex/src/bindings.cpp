@@ -470,6 +470,94 @@ py::tuple findLines3DTemporal(
 	return py::make_tuple(lines_, labeling_);
 }
 
+py::tuple findLines3DDual(
+	py::array_t<double> points_,
+	py::array_t<double> weights_,
+	double threshold_dense,
+	double threshold_sparse,
+	double conf,
+	double spatial_coherence_weight,
+	double neighborhood_ball_radius,
+	double maximum_tanimoto_similarity,
+	int max_iters,
+	int minimum_point_number_dense,
+	int minimum_point_number_sparse,
+	int maximum_model_number,
+	int sampler_id,
+	double scoring_exponent,
+	bool do_logging) 
+{
+	py::buffer_info buf1 = points_.request();
+	size_t NUM_TENTS = buf1.shape[0];
+	size_t DIM = buf1.shape[1];
+
+	if (DIM != 3) 
+		throw std::invalid_argument("Points should be an array with dims [n,3], n>=2");
+	if (NUM_TENTS < 2) 
+		throw std::invalid_argument("Points should be an array with dims [n,3], n>=2");
+
+	double *ptr1 = (double *)buf1.ptr;
+	std::vector<double> corrs;
+	corrs.assign(ptr1, ptr1 + buf1.size);
+
+	// Parsing the weights
+	py::buffer_info bufW = weights_.request();
+	DIM = bufW.ndim;
+
+	std::vector<double> weights;
+	if (DIM > 0)
+	{
+		double *ptrW = (double *)bufW.ptr;
+		weights.assign(ptrW, ptrW + bufW.size);
+	}
+
+	std::vector<double> lines;	
+	std::vector<size_t> labeling(NUM_TENTS);
+	std::vector<int> line_types;
+
+	int num_models = findLines3DDual_(
+		corrs,
+		weights,
+		labeling,
+		lines,
+		line_types,
+		spatial_coherence_weight,
+		threshold_dense,
+		threshold_sparse,
+		conf,
+		neighborhood_ball_radius,
+		maximum_tanimoto_similarity,
+		max_iters,
+		minimum_point_number_dense,
+		minimum_point_number_sparse,
+		maximum_model_number,
+		sampler_id,
+		scoring_exponent,
+		do_logging);
+		
+	py::array_t<int> labeling_ = py::array_t<int>(NUM_TENTS);
+	py::buffer_info buf3 = labeling_.request();
+	int *ptr3 = (int *)buf3.ptr;
+	for (size_t i = 0; i < NUM_TENTS; i++)
+		ptr3[i] = static_cast<int>(labeling[i]);
+	
+	py::array_t<double> lines_ = py::array_t<double>(
+		{ static_cast<py::ssize_t>(num_models), static_cast<py::ssize_t>(6) }
+	);
+	py::buffer_info buf2 = lines_.request();
+	double *ptr2 = (double *)buf2.ptr;
+	for (size_t i = 0; i < 6 * num_models; i++)
+		ptr2[i] = lines[i];
+
+	py::array_t<int> line_types_ = py::array_t<int>(num_models);
+	py::buffer_info buf4 = line_types_.request();
+	int *ptr4 = (int *)buf4.ptr;
+	for (size_t i = 0; i < num_models; i++)
+		ptr4[i] = line_types[i];
+
+	return py::make_tuple(lines_, labeling_, line_types_);
+}
+
 py::tuple findTwoViewMotions(
 	py::array_t<double>  corrs_,
 	size_t w1, size_t h1,
@@ -693,28 +781,69 @@ PYBIND11_PLUGIN(pyprogressivex) {
 			max_iters: maximum number of iterations (default: 1000)
 			minimum_point_number: minimum points per line (default: 10)
 			maximum_model_number: maximum number of lines (-1 for no limit, default: -1)
-			sampler_id: sampler type (0=uniform, 1=PROSAC, 2=NAPSAC, default: 0)
-			scoring_exponent: scoring exponent (default: 1.0)
-			do_logging: enable logging (default: False)
+			sampler_id: sampler type (0=uniform, 1=PROSAC, 2=NAPSAC, 3=Z-Aligned, default: 3)
+			scoring_exponent: scoring exponent (default: 0.0)
+			do_logging: enable verbose logging (default: False)
 		
 		Returns:
-			tuple: (lines, labeling)
-			- lines: numpy array of shape [num_lines, 6] where each line is [p₀x, p₀y, p₀t, dx, dy, dt]
-			  (point on line + direction vector, with dt > 0)
-			- labeling: numpy array of shape [n] where 0=outlier, 1,2,...=line indices
+			tuple: (lines, labeling) where lines is [num_lines, 6] and labeling is [n]
 	)doc",
 		py::arg("points"),
 		py::arg("weights"),
-		py::arg("threshold") = 0.1,
+		py::arg("threshold"),
 		py::arg("conf") = 0.99,
 		py::arg("spatial_coherence_weight") = 0.0,
-		py::arg("neighborhood_ball_radius") = 0.1,
+		py::arg("neighborhood_ball_radius") = 200.0,
 		py::arg("maximum_tanimoto_similarity") = 1.0,
 		py::arg("max_iters") = 1000,
 		py::arg("minimum_point_number") = 10,
 		py::arg("maximum_model_number") = -1,
-		py::arg("sampler_id") = 0,
-		py::arg("scoring_exponent") = 1.0,
+		py::arg("sampler_id") = 3,
+		py::arg("scoring_exponent") = 0.0,
+		py::arg("do_logging") = false);
+
+	m.def("findLines3DDual", &findLines3DDual, R"doc(
+		Find both dense and sparse 3D lines using Progressive-X with mutual exclusivity.
+		First detects dense lines, then detects sparse lines from remaining unassigned points.
+		Each point can only be assigned to one line type (dense or sparse).
+		
+		Args:
+			points: numpy array of shape [n, 3] with 3D points (x, y, z)
+			weights: numpy array of weights (can be empty)
+			threshold_dense: distance threshold for dense line detection
+			threshold_sparse: distance threshold for sparse line detection (typically larger)
+			conf: confidence level (default: 0.05)
+			spatial_coherence_weight: weight for spatial coherence term (default: 0.0)
+			neighborhood_ball_radius: radius for neighborhood graph (default: adaptive)
+			maximum_tanimoto_similarity: maximum similarity for model merging (default: 0.40)
+			max_iters: maximum number of iterations (default: 4000)
+			minimum_point_number_dense: minimum points per dense line (default: 10)
+			minimum_point_number_sparse: minimum points per sparse line (default: 5)
+			maximum_model_number: maximum number of lines (-1 for no limit, default: 20000)
+			sampler_id: sampling type (0=uniform, 1=PROSAC, 2=NAPSAC, 3=Z-Aligned, default: 3)
+			scoring_exponent: scoring exponent (default: 0.0)
+			do_logging: enable verbose logging (default: False)
+		
+		Returns:
+			tuple: (lines, labeling, line_types) where:
+				- lines: [num_lines, 6] array of line parameters [p0x, p0y, p0z, dx, dy, dz]
+				- labeling: [n] array of point labels (0-indexed, SIZE_MAX for outliers)
+				- line_types: [num_lines] array of line types (0=dense, 1=sparse)
+	)doc",
+		py::arg("points"),
+		py::arg("weights"),
+		py::arg("threshold_dense"),
+		py::arg("threshold_sparse"),
+		py::arg("conf") = 0.05,
+		py::arg("spatial_coherence_weight") = 0.0,
+		py::arg("neighborhood_ball_radius") = 200.0,
+		py::arg("maximum_tanimoto_similarity") = 0.40,
+		py::arg("max_iters") = 4000,
+		py::arg("minimum_point_number_dense") = 10,
+		py::arg("minimum_point_number_sparse") = 5,
+		py::arg("maximum_model_number") = 20000,
+		py::arg("sampler_id") = 3,
+		py::arg("scoring_exponent") = 0.0,
 		py::arg("do_logging") = false);
 
   return m.ptr();

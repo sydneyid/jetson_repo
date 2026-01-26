@@ -10,6 +10,8 @@ IMPORTANT: Due to a gflags conflict in conda environments, you MUST run this scr
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
+import matplotlib.colors
 from mpl_toolkits.mplot3d import Axes3D
 import sys
 import os
@@ -413,100 +415,13 @@ def main():
                         print(f"   ✓ Using 0-indexed interpretation: label 0 = first model")
         
         
-        # FILTER: Remove lines that aren't parallel to time axis (for event data)
-        # Lines should be parallel to Z (time) axis, so direction should be close to (0, 0, 1)
-        print(f"\n   Filtering: Removing non-parallel lines (must be parallel to time axis)...")
-        expected_direction = np.array([0.0, 0.0, 1.0])  # Time axis direction
-        parallel_valid_indices = []
-        # More lenient threshold: 10° = cos(10°) ≈ 0.9848 (was 5°, trying 10° to keep more lines)
-        parallel_threshold = np.cos(np.deg2rad(1.0))  # Lines must be within 10° of time axis
-        
-        # Iterate over all detected lines
-        for idx in range(num_models):
-            line_dir = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
-            line_dir = line_dir / np.linalg.norm(line_dir)
-            
-            # Check if line is parallel to time axis
-            dot_with_time = np.abs(np.dot(line_dir, expected_direction))
-            angle_with_time = np.arccos(np.clip(dot_with_time, -1, 1)) * 180 / np.pi
-            
-            if dot_with_time >= parallel_threshold:
-                parallel_valid_indices.append(idx)
-            else:
-                print(f"   ✗ Removed line {idx+1}: not parallel to time axis (angle={angle_with_time:.1f}°, threshold=10.0°)")
-        
-        # FILTER: Remove lines that aren't parallel to each other
-        # Ensure ALL pairs of lines are within 10° of each other (was 5°, trying 10° to keep more lines)
-        # OPTIMIZATION: Use vectorized operations for O(n²) pairwise comparisons
-        if len(parallel_valid_indices) > 1:
-            print(f"\n   Filtering: Ensuring all lines are parallel to each other (all pairs within 10°)...")
-            final_valid_indices = list(parallel_valid_indices)
-            
-            # OPTIMIZATION: Vectorized approach - compute all pairwise dot products at once
-            # Build matrix of normalized directions (only once)
-            n_lines = len(final_valid_indices)
-            dirs_matrix = np.zeros((n_lines, 3))
-            for pos, idx in enumerate(final_valid_indices):
-                dir_vec = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
-                dirs_matrix[pos] = dir_vec / np.linalg.norm(dir_vec)
-            
-            # Compute pairwise dot products: dirs_matrix @ dirs_matrix.T gives n×n matrix
-            # Each element [i,j] is dot(dirs[i], dirs[j])
-            pairwise_dots = np.abs(dirs_matrix @ dirs_matrix.T)  # n×n matrix
-            
-            # Remove lines that aren't parallel to all others
-            removed_any = True
-            iteration = 0
-            max_iterations = 10  # Prevent infinite loops
-            
-            while removed_any and len(final_valid_indices) > 1 and iteration < max_iterations:
-                removed_any = False
-                iteration += 1
-                lines_to_remove = []
-                
-                # OPTIMIZATION: Use vectorized check - for each line, check if ALL other dots >= threshold
-                # Create a mask to exclude diagonal (self-comparisons)
-                mask = np.ones_like(pairwise_dots, dtype=bool)
-                np.fill_diagonal(mask, False)  # Exclude self-comparisons
-                
-                # For each line, check if minimum dot product with others is >= threshold
-                # If min < threshold, this line is not parallel to at least one other
-                min_dots_per_line = np.where(mask, pairwise_dots, 1.0).min(axis=1)
-                invalid_positions = np.where(min_dots_per_line < parallel_threshold)[0]
-                
-                for pos in invalid_positions:
-                    idx = final_valid_indices[pos]
-                    lines_to_remove.append((pos, idx))
-                    removed_any = True
-                
-                # Remove invalid lines (in reverse order to maintain indices)
-                for pos, idx in sorted(lines_to_remove, reverse=True):
-                    # Find which line it wasn't parallel to for reporting
-                    non_parallel_pos = np.where(pairwise_dots[pos] < parallel_threshold)[0]
-                    if len(non_parallel_pos) > 0:
-                        other_pos = non_parallel_pos[0]
-                        if other_pos != pos:  # Don't compare with self
-                            other_idx = final_valid_indices[other_pos]
-                            angle_deg = np.arccos(np.clip(pairwise_dots[pos, other_pos], -1, 1)) * 180 / np.pi
-                            print(f"   ✗ Removed line {idx+1}: not parallel to line {other_idx+1} (angle={angle_deg:.1f}°, threshold=10.0°)")
-                    
-                    # Remove from final_valid_indices
-                    final_valid_indices.pop(pos)
-                    # Remove row and column from matrices (more efficient than rebuilding)
-                    dirs_matrix = np.delete(dirs_matrix, pos, axis=0)
-                    pairwise_dots = np.delete(np.delete(pairwise_dots, pos, axis=0), pos, axis=1)
-            
-            valid_line_indices = final_valid_indices
-        else:
-            valid_line_indices = parallel_valid_indices
-        
-        print(f"   ✓ Kept {len(valid_line_indices)} parallel lines out of {len(parallel_valid_indices)} time-axis-parallel lines")
-        
+
+        valid_line_indices = parallel_check(lines,labeling,num_models , parallel_threshold = 1.0,print_updates=True )
+
         # Summary of detection pipeline
         print(f"\n   📊 DETECTION PIPELINE SUMMARY:")
         print(f"      Stage 1 (Progressive-X): {num_models} suggested/proposed lines")
-        print(f"      Stage 2 (Time-axis parallel): {len(parallel_valid_indices)} lines parallel to time axis")
-        print(f"      Stage 3 (Mutual parallel): {len(valid_line_indices)} final lines (all parallel to each other)")
+        print(f"      Stage 2 (Mutual parallel): {len(valid_line_indices)} final lines (all parallel to each other)")
         
 
         # Visualization
@@ -640,9 +555,6 @@ def main():
         x_coords = points_raw[:, 0].astype(int)
         y_coords = points_raw[:, 1].astype(int)
         
-        
-        # Use np.add.at to accumulate events at specific pixel locations
-        # Note: y-coordinate is flipped (height - 1 - y) to match image coordinate system
         np.add.at(accumulated_frame, (y_coords, x_coords), 1)
         
         print(f"   Accumulated frame range: [{accumulated_frame.min():.1f}, {accumulated_frame.max():.1f}]")
@@ -667,8 +579,7 @@ def main():
                 line_centroids.append((centroid_x, centroid_y, i+1))
         
         # Create new figure for heatmap
-        import matplotlib
-        import matplotlib.colors
+        
         fig2 = plt.figure(figsize=(12, 8))
         ax_heatmap = fig2.gca()
         

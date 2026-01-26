@@ -854,6 +854,163 @@ namespace gcransac
 		// Default 3D Line Estimator type
 		typedef Line3DEstimator<solver::Line3DSolver, solver::Line3DSolver> Default3DLineEstimator;
 
+		// 3D Line Solver for Sparse/Noisy Lines
+		// Uses more robust fitting for sparse or noisy data
+		namespace solver
+		{
+			class Line3DSparseSolver : public SolverEngine
+			{
+			public:
+				Line3DSparseSolver() {}
+				~Line3DSparseSolver() {}
+
+				static constexpr bool returnMultipleModels() { return false; }
+				static constexpr size_t maximumSolutions() { return 1; }
+				static constexpr size_t sampleSize() { return 2; } // 2 points needed for a 3D line
+				static constexpr bool needsGravity() { return false; }
+
+				OLGA_INLINE bool estimateModel(
+					const cv::Mat& data_,
+					const size_t *sample_,
+					size_t sample_number_,
+					std::vector<Model> &models_,
+					const double *weights_ = nullptr) const
+				{
+					const double* dataPtr = reinterpret_cast<const double*>(data_.data);
+					const int kColumns = data_.cols;
+
+					if (sample_number_ == 2)
+					{
+						// Minimal case: 2 points define a line
+						const double* p1 = dataPtr + kColumns * sample_[0];
+						const double* p2 = dataPtr + kColumns * sample_[1];
+
+						// Point on line: use first point
+						Eigen::Vector3d point(p1[0], p1[1], p1[2]);
+						
+						// Direction vector: from p1 to p2, normalized
+						Eigen::Vector3d direction(p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]);
+						double dir_norm = direction.norm();
+						if (dir_norm < 1e-10) // Points are too close
+							return false;
+						direction.normalize();
+
+						models_.resize(models_.size() + 1);
+						models_.back().descriptor.resize(6, 1);
+						models_.back().descriptor << point, direction;
+						return true;
+					}
+					else
+					{
+						// Non-minimal case: fit line to multiple points using robust SVD
+						// For sparse lines, we use the same SVD approach but the threshold
+						// will be larger when this estimator is used
+						Eigen::MatrixXd points(sample_number_, 3);
+						for (size_t i = 0; i < sample_number_; ++i)
+						{
+							const double* p = dataPtr + kColumns * sample_[i];
+							points(i, 0) = p[0];
+							points(i, 1) = p[1];
+							points(i, 2) = p[2];
+						}
+
+						// Center the points
+						Eigen::Vector3d centroid = points.colwise().mean();
+						Eigen::MatrixXd centered = points.rowwise() - centroid.transpose();
+
+						// SVD to find the direction (principal component)
+						Eigen::JacobiSVD<Eigen::MatrixXd> svd(centered, Eigen::ComputeThinV);
+						Eigen::Vector3d direction = svd.matrixV().col(0);
+						direction.normalize();
+
+						// Use centroid as point on line
+						Eigen::Vector3d point = centroid;
+
+						models_.resize(models_.size() + 1);
+						models_.back().descriptor.resize(6, 1);
+						models_.back().descriptor << point, direction;
+						return true;
+					}
+				}
+			};
+		}
+
+		// 3D Line Estimator for Sparse/Noisy Lines
+		// Uses the same residual calculation but will be called with a larger threshold
+		template<class _MinimalSolverEngine, class _NonMinimalSolverEngine>
+		class Line3DSparseEstimator : public Estimator<cv::Mat, Model>
+		{
+		protected:
+			const std::shared_ptr<_MinimalSolverEngine> minimal_solver;
+			const std::shared_ptr<_NonMinimalSolverEngine> non_minimal_solver;
+
+		public:
+			Line3DSparseEstimator() :
+				minimal_solver(std::make_shared<_MinimalSolverEngine>()),
+				non_minimal_solver(std::make_shared<_NonMinimalSolverEngine>())
+			{}
+
+			~Line3DSparseEstimator() {}
+
+			static constexpr size_t sampleSize() { return _MinimalSolverEngine::sampleSize(); }
+			static constexpr size_t maximumMinimalSolutions() { return _MinimalSolverEngine::maximumSolutions(); }
+			static constexpr bool isWeightingApplicable() { return true; }
+
+			inline size_t inlierLimit() const { return 7 * sampleSize(); }
+
+			inline bool estimateModel(
+				const cv::Mat& data_,
+				const size_t *sample_,
+				std::vector<Model>* models_) const
+			{
+				return minimal_solver->estimateModel(data_, sample_, sampleSize(), *models_);
+			}
+
+			inline bool estimateModelNonminimal(
+				const cv::Mat& data_,
+				const size_t *sample_,
+				const size_t &sample_number,
+				std::vector<Model>* models_,
+				const double *weights_ = nullptr) const
+			{
+				return non_minimal_solver->estimateModel(data_, sample_, sample_number, *models_, weights_);
+			}
+
+			// The size of a non-minimal sample required for the estimation
+			static constexpr size_t nonMinimalSampleSize() {
+				return _NonMinimalSolverEngine::sampleSize();
+			}
+
+			// Calculate point-to-line distance in 3D (same as regular estimator)
+			inline double residual(const cv::Mat& data_, const Model& model) const
+			{
+				return std::sqrt(squaredResidual(data_, model));
+			}
+
+			inline double squaredResidual(const cv::Mat& data_, const Model& model) const
+			{
+				// Same residual calculation as regular 3D line estimator
+				const double* pointPtr = reinterpret_cast<const double*>(data_.data);
+				
+				// Extract line parameters: [p₀x, p₀y, p₀z, dx, dy, dz]
+				Eigen::Vector3d line_point(model.descriptor(0), model.descriptor(1), model.descriptor(2));
+				Eigen::Vector3d line_dir(model.descriptor(3), model.descriptor(4), model.descriptor(5));
+				
+				// Point coordinates (row-major storage)
+				Eigen::Vector3d point(pointPtr[0], pointPtr[1], pointPtr[2]);
+				
+				// Vector from line point to data point
+				Eigen::Vector3d vec = point - line_point;
+				
+				// Perpendicular distance: ||(point - line_point) × direction||
+				Eigen::Vector3d cross = vec.cross(line_dir);
+				return cross.squaredNorm();
+			}
+		};
+
+		// Default 3D Line Sparse Estimator type
+		typedef Line3DSparseEstimator<solver::Line3DSparseSolver, solver::Line3DSparseSolver> Default3DLineSparseEstimator;
+
 		// 3D Line Solver with Temporal Constraint (for event data)
 		// Ensures that the line direction has positive time component (dt > 0)
 		// and that points along the line have monotonically increasing time
@@ -1405,4 +1562,305 @@ int findLines3DTemporal_(
 	}
 	
 	return progressive_x.getModelNumber();
+}
+
+// Dual 3D Line Detection: Detects both dense and sparse lines with mutual exclusivity
+int findLines3DDual_(
+	std::vector<double>& input_points,
+	std::vector<double>& weights,
+	std::vector<size_t>& labeling,
+	std::vector<double>& lines,
+	std::vector<int>& line_types,  // 0 = dense, 1 = sparse
+	const double &spatial_coherence_weight,
+	const double &threshold_dense,  // Threshold for dense lines
+	const double &threshold_sparse, // Threshold for sparse lines (typically larger)
+	const double &confidence,
+	const double &neighborhood_ball_radius,
+	const double &maximum_tanimoto_similarity,
+	const size_t &max_iters,
+	const size_t &minimum_point_number_dense,  // Min points for dense lines
+	const size_t &minimum_point_number_sparse, // Min points for sparse lines
+	const int &maximum_model_number,
+	const size_t &sampler_id,
+	const double &scoring_exponent,
+	const bool do_logging)
+{
+	// Initialize Google's logging library (once globally)
+	initGoogleLoggingOnce();
+	
+	const size_t num_tents = input_points.size() / 3; // 3D points: x, y, z
+	cv::Mat points(num_tents, 3, CV_64F, &input_points[0]);
+	
+	// Initialize the neighborhood used in Graph-cut RANSAC
+	gcransac::neighborhood::FlannNeighborhoodGraph neighborhood(&points,
+		neighborhood_ball_radius);
+
+	// Initialize the samplers
+	constexpr size_t kSampleSize = 2; // 2 points for a 3D line
+	typedef gcransac::sampler::Sampler<cv::Mat, size_t> AbstractSampler;
+	std::unique_ptr<AbstractSampler> main_sampler;
+	if (sampler_id == 0) // Uniform sampler
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::UniformSampler(&points));
+	else if (sampler_id == 1)  // PROSAC sampler
+	{
+		if (do_logging)
+			printf("Note: PROSAC sampler requires the points to be ordered by quality.\n");
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::ProsacSampler(&points, kSampleSize));
+	}
+	else if (sampler_id == 2) // NAPSAC sampler
+		main_sampler = std::unique_ptr<AbstractSampler>(
+			new gcransac::sampler::NapsacSampler<gcransac::neighborhood::FlannNeighborhoodGraph>(&points, &neighborhood));
+	else if (sampler_id == 3) // Z-Aligned sampler
+	{
+		double spatial_thresh = threshold_dense * 0.5;
+		double min_z_sep = threshold_dense * 2.0;
+		main_sampler = std::unique_ptr<AbstractSampler>(
+			new gcransac::sampler::ZAlignedSampler(&points, spatial_thresh, min_z_sep));
+	}
+	else
+	{
+		fprintf(stderr, "Unknown sampler identifier: %d\n", sampler_id);
+		return 0;
+	}
+
+	gcransac::sampler::UniformSampler local_optimization_sampler(&points);
+
+	// Step 1: Detect DENSE lines using regular 3D line estimator
+	if (do_logging)
+		printf("Detecting DENSE lines (threshold=%.6f, min_points=%zu)...\n", threshold_dense, minimum_point_number_dense);
+
+	progx::ProgressiveX<gcransac::neighborhood::FlannNeighborhoodGraph,
+		gcransac::estimator::Default3DLineEstimator,
+		AbstractSampler,
+		gcransac::sampler::UniformSampler>
+		progressive_x_dense(nullptr);
+
+	progx::MultiModelSettings &settings_dense = progressive_x_dense.getMutableSettings();
+	settings_dense.minimum_number_of_inliers = minimum_point_number_dense;
+	settings_dense.inlier_outlier_threshold = threshold_dense;
+	settings_dense.setConfidence(confidence);
+	settings_dense.maximum_tanimoto_similarity = maximum_tanimoto_similarity;
+	settings_dense.spatial_coherence_weight = spatial_coherence_weight;
+	settings_dense.proposal_engine_settings.max_iteration_number = max_iters;
+	settings_dense.proposal_engine_settings.max_local_optimization_number = 1;
+	settings_dense.proposal_engine_settings.do_final_iterated_least_squares = false;
+	settings_dense.proposal_engine_settings.max_graph_cut_number = 1;
+	settings_dense.proposal_engine_settings.min_iteration_number_before_lo = 5;
+	settings_dense.proposal_engine_settings.use_inlier_limit = true;
+	settings_dense.proposal_engine_settings.max_least_squares_iterations = 1;
+	settings_dense.proposal_engine_settings.min_iteration_number = 5;
+	settings_dense.max_proposal_number_without_change = 300;
+	if (maximum_model_number > 0)
+		settings_dense.maximum_model_number = maximum_model_number;
+	progressive_x_dense.setScoringExponent(scoring_exponent);
+	progressive_x_dense.log(do_logging);
+
+	progressive_x_dense.run(points, neighborhood, *main_sampler, local_optimization_sampler);
+
+	// Get dense line results
+	const auto &stats_dense = progressive_x_dense.getStatistics();
+	std::vector<size_t> labeling_dense = stats_dense.labeling;
+	size_t num_dense_lines = progressive_x_dense.getModelNumber();
+
+	if (do_logging)
+		printf("Found %zu DENSE lines\n", num_dense_lines);
+
+	// Step 2: Detect SPARSE lines using sparse 3D line estimator
+	// Only consider points NOT assigned to dense lines
+	// Note: Progressive-X labeling: 0 = first model (or outlier if 0-indexed), 1, 2, 3... = other models
+	// We need to check: if label >= num_dense_lines, it's an outlier (or if 0-indexed, label < num_dense_lines means assigned)
+	// Actually, labels are 0-indexed: 0, 1, 2, ..., num_dense_lines-1 are the dense line labels
+	// So any point with label >= num_dense_lines is an outlier (not assigned to any dense line)
+	cv::Mat points_sparse;
+	std::vector<size_t> sparse_point_indices;
+	for (size_t i = 0; i < num_tents; ++i)
+	{
+		// Check if point is NOT assigned to any dense line
+		// If labeling is 0-indexed: labels 0..(num_dense_lines-1) are dense lines
+		// If num_dense_lines == 0, all points are outliers
+		// If num_dense_lines > 0, check if label >= num_dense_lines (outlier) OR if we're using 1-indexed, check differently
+		bool is_outlier = true;
+		if (num_dense_lines > 0)
+		{
+			// Labels are 0-indexed: 0, 1, 2, ..., num_dense_lines-1 are dense line labels
+			// So if label < num_dense_lines, it's assigned to a dense line
+			if (labeling_dense[i] < num_dense_lines)
+			{
+				is_outlier = false;
+			}
+		}
+		
+		if (is_outlier)
+		{
+			sparse_point_indices.push_back(i);
+		}
+	}
+	
+	if (do_logging)
+		printf("Points available for sparse detection: %zu out of %zu (%.1f%%)\n",
+			sparse_point_indices.size(), num_tents, 100.0 * sparse_point_indices.size() / num_tents);
+
+	if (sparse_point_indices.empty())
+	{
+		if (do_logging)
+			printf("No points available for SPARSE line detection (all assigned to dense lines)\n");
+		// Return only dense lines
+		labeling = labeling_dense;
+		lines.reserve(6 * num_dense_lines);
+		line_types.reserve(num_dense_lines);
+		for (size_t model_idx = 0; model_idx < num_dense_lines; ++model_idx)
+		{
+			const auto &model = progressive_x_dense.getModels()[model_idx];
+			lines.emplace_back(model.descriptor(0));
+			lines.emplace_back(model.descriptor(1));
+			lines.emplace_back(model.descriptor(2));
+			lines.emplace_back(model.descriptor(3));
+			lines.emplace_back(model.descriptor(4));
+			lines.emplace_back(model.descriptor(5));
+			line_types.push_back(0); // Dense line
+		}
+		return num_dense_lines;
+	}
+
+	// Create sparse points matrix
+	points_sparse = cv::Mat(static_cast<int>(sparse_point_indices.size()), 3, CV_64F);
+	for (size_t i = 0; i < sparse_point_indices.size(); ++i)
+	{
+		const double* src = points.ptr<double>(sparse_point_indices[i]);
+		double* dst = points_sparse.ptr<double>(i);
+		dst[0] = src[0];
+		dst[1] = src[1];
+		dst[2] = src[2];
+	}
+
+	gcransac::neighborhood::FlannNeighborhoodGraph neighborhood_sparse(&points_sparse,
+		neighborhood_ball_radius);
+
+	// Create sampler for sparse points
+	std::unique_ptr<AbstractSampler> main_sampler_sparse;
+	if (sampler_id == 0)
+		main_sampler_sparse = std::unique_ptr<AbstractSampler>(new gcransac::sampler::UniformSampler(&points_sparse));
+	else if (sampler_id == 1)
+		main_sampler_sparse = std::unique_ptr<AbstractSampler>(new gcransac::sampler::ProsacSampler(&points_sparse, kSampleSize));
+	else if (sampler_id == 2)
+		main_sampler_sparse = std::unique_ptr<AbstractSampler>(
+			new gcransac::sampler::NapsacSampler<gcransac::neighborhood::FlannNeighborhoodGraph>(&points_sparse, &neighborhood_sparse));
+	else if (sampler_id == 3)
+	{
+		double spatial_thresh = threshold_sparse * 0.5;
+		double min_z_sep = threshold_sparse * 2.0;
+		main_sampler_sparse = std::unique_ptr<AbstractSampler>(
+			new gcransac::sampler::ZAlignedSampler(&points_sparse, spatial_thresh, min_z_sep));
+	}
+	else
+		main_sampler_sparse = std::unique_ptr<AbstractSampler>(new gcransac::sampler::UniformSampler(&points_sparse));
+
+	gcransac::sampler::UniformSampler local_optimization_sampler_sparse(&points_sparse);
+
+	if (do_logging)
+		printf("Detecting SPARSE lines from %zu unassigned points (threshold=%.6f, min_points=%zu, conf=%.3f)...\n",
+			sparse_point_indices.size(), threshold_sparse, minimum_point_number_sparse, confidence);
+
+	progx::ProgressiveX<gcransac::neighborhood::FlannNeighborhoodGraph,
+		gcransac::estimator::Default3DLineSparseEstimator,
+		AbstractSampler,
+		gcransac::sampler::UniformSampler>
+		progressive_x_sparse(nullptr);
+
+	progx::MultiModelSettings &settings_sparse = progressive_x_sparse.getMutableSettings();
+	settings_sparse.minimum_number_of_inliers = minimum_point_number_sparse;
+	settings_sparse.inlier_outlier_threshold = threshold_sparse;
+	// Use lower confidence for sparse lines to be more thorough
+	settings_sparse.setConfidence(confidence * 0.5); // More thorough search for sparse lines
+	settings_sparse.maximum_tanimoto_similarity = maximum_tanimoto_similarity;
+	settings_sparse.spatial_coherence_weight = spatial_coherence_weight;
+	// More iterations for sparse lines since they're harder to find
+	settings_sparse.proposal_engine_settings.max_iteration_number = max_iters * 2; // Double iterations for sparse
+	settings_sparse.proposal_engine_settings.max_local_optimization_number = 1;
+	settings_sparse.proposal_engine_settings.do_final_iterated_least_squares = false;
+	settings_sparse.proposal_engine_settings.max_graph_cut_number = 1;
+	settings_sparse.proposal_engine_settings.min_iteration_number_before_lo = 5;
+	settings_sparse.proposal_engine_settings.use_inlier_limit = true;
+	settings_sparse.proposal_engine_settings.max_least_squares_iterations = 1;
+	settings_sparse.proposal_engine_settings.min_iteration_number = 5;
+	settings_sparse.max_proposal_number_without_change = 300;
+	if (maximum_model_number > 0)
+		settings_sparse.maximum_model_number = maximum_model_number;
+	progressive_x_sparse.setScoringExponent(scoring_exponent);
+	progressive_x_sparse.log(do_logging);
+
+	progressive_x_sparse.run(points_sparse, neighborhood_sparse, *main_sampler_sparse, local_optimization_sampler_sparse);
+
+	// Get sparse line results (relative to sparse_point_indices)
+	const auto &stats_sparse = progressive_x_sparse.getStatistics();
+	std::vector<size_t> labeling_sparse_relative = stats_sparse.labeling;
+	size_t num_sparse_lines = progressive_x_sparse.getModelNumber();
+
+	if (do_logging)
+		printf("Found %zu SPARSE lines from %zu unassigned points\n", num_sparse_lines, sparse_point_indices.size());
+
+	// Step 3: Merge results with mutual exclusivity
+	// Progressive-X uses 0-indexed labels: 0, 1, 2, 3... where 0, 1, ..., num_models-1 are models
+	// Initialize all as unassigned (will be set below)
+	labeling.resize(num_tents, 0);
+	
+	// Assign dense line labels (0-indexed: 0, 1, 2, ..., num_dense_lines-1)
+	for (size_t i = 0; i < num_tents; ++i)
+	{
+		// If point is assigned to a dense line (label < num_dense_lines), keep the label
+		if (labeling_dense[i] < num_dense_lines)
+		{
+			labeling[i] = labeling_dense[i]; // Keep 0-indexed dense label
+		}
+	}
+
+	// Assign sparse line labels (offset by num_dense_lines)
+	// Sparse labels in relative space: 0, 1, 2, ... (0-indexed)
+	// Map to global: num_dense_lines, num_dense_lines+1, num_dense_lines+2, ...
+	for (size_t sparse_idx = 0; sparse_idx < sparse_point_indices.size(); ++sparse_idx)
+	{
+		// If point is assigned to a sparse line (label < num_sparse_lines in relative space)
+		if (labeling_sparse_relative[sparse_idx] < num_sparse_lines)
+		{
+			size_t original_idx = sparse_point_indices[sparse_idx];
+			// Map sparse label (0, 1, 2...) to global label (num_dense_lines, num_dense_lines+1, ...)
+			labeling[original_idx] = num_dense_lines + labeling_sparse_relative[sparse_idx];
+		}
+	}
+
+	// Combine line parameters
+	size_t total_lines = num_dense_lines + num_sparse_lines;
+	lines.reserve(6 * total_lines);
+	line_types.reserve(total_lines);
+
+	// Add dense lines
+	for (size_t model_idx = 0; model_idx < num_dense_lines; ++model_idx)
+	{
+		const auto &model = progressive_x_dense.getModels()[model_idx];
+		lines.emplace_back(model.descriptor(0));
+		lines.emplace_back(model.descriptor(1));
+		lines.emplace_back(model.descriptor(2));
+		lines.emplace_back(model.descriptor(3));
+		lines.emplace_back(model.descriptor(4));
+		lines.emplace_back(model.descriptor(5));
+		line_types.push_back(0); // Dense line
+	}
+
+	// Add sparse lines
+	for (size_t model_idx = 0; model_idx < num_sparse_lines; ++model_idx)
+	{
+		const auto &model = progressive_x_sparse.getModels()[model_idx];
+		lines.emplace_back(model.descriptor(0));
+		lines.emplace_back(model.descriptor(1));
+		lines.emplace_back(model.descriptor(2));
+		lines.emplace_back(model.descriptor(3));
+		lines.emplace_back(model.descriptor(4));
+		lines.emplace_back(model.descriptor(5));
+		line_types.push_back(1); // Sparse line
+	}
+
+	if (do_logging)
+		printf("Total: %zu lines (%zu dense, %zu sparse)\n", total_lines, num_dense_lines, num_sparse_lines);
+
+	return total_lines;
 }

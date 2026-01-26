@@ -16,6 +16,7 @@ import os
 import h5py
 from time import time
 import warnings
+from scipy.spatial.distance import cdist
 
 # Add parent directory to path to import pyprogressivex
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -232,13 +233,6 @@ def main():
         return 1
     
 
-    # Convert to integer coordinates for efficient filtering
-    x_int = points_raw[:, 0].astype(int)
-    y_int = points_raw[:, 1].astype(int)
-    t_int = points_raw[:, 2].astype(np.int64)  # Keep as int64 for time
-    
-    print(f"   ✓ Using all {len(points_raw):,} events (activity filter disabled for maximum line detection)")
-    
     # OPTIMIZATION: Optional downsampling for very large datasets
     # If dataset is extremely large (>500k points), consider downsampling
     # This can significantly speed up Progressive-X without losing too much information
@@ -286,7 +280,7 @@ def main():
     # Compute optimal parameters - tuned for parallel lines
     print("\n4. Computing optimal parameters (tuned for parallel lines)...")
     
-    from scipy.spatial.distance import cdist
+    
     n_sample = min(100, len(points_normalized))
     sample_indices = np.random.choice(len(points_normalized), n_sample, replace=False)
     sample_points = points_normalized[sample_indices]
@@ -372,20 +366,31 @@ def main():
         old_stdout = sys.stdout
         sys.stdout = sys.__stdout__  # Use unbuffered stdout
         
-        lines, labeling = pyprogressivex.findLines3D(
+        # DUAL DETECTION: Detect both dense and sparse lines with mutual exclusivity
+        # Dense lines use stricter threshold, sparse lines use more permissive threshold
+        threshold_dense = final_threshold  # Stricter for dense lines
+        threshold_sparse = final_threshold * 3.0  # More permissive for sparse lines (3x threshold, was 2x)
+        minimum_point_number_sparse = max(3, minimum_point_number // 2)  # Lower minimum for sparse lines (half of dense)
+        
+        print(f"   Dense line detection: threshold={threshold_dense:.6f}, min_points={minimum_point_number}")
+        print(f"   Sparse line detection: threshold={threshold_sparse:.6f}, min_points={minimum_point_number_sparse}")
+        
+        lines, labeling, line_types = pyprogressivex.findLines3DDual(
             np.ascontiguousarray(points_normalized, dtype=np.float64),
             np.ascontiguousarray([], dtype=np.float64),  # No weights
-            threshold=final_threshold,
-            conf=conf_optimized,  # OPTIMIZED: Moderate confidence (0.05) for speed while finding many models
+            threshold_dense=threshold_dense,
+            threshold_sparse=threshold_sparse,
+            conf=conf_optimized,
             spatial_coherence_weight=0.0,
             neighborhood_ball_radius=neighbor_radius,
-            maximum_tanimoto_similarity=0.30,  # ADJUSTED FOR SPARSE LINE: Lower to prevent sparse line from merging with dense line
-            max_iters=max_iters_optimized,  # OPTIMIZED: Reduced from 2M to reasonable value
-            minimum_point_number=minimum_point_number,
-            maximum_model_number=20000,  # Allow MANY more lines
-            sampler_id=sampler_id_optimized,  # OPTIMIZED: Z-Aligned sampler (samples along time-parallel lines)
-            scoring_exponent=0.0,  # NO penalty for shared support (allows sparse line to compete with dense line)
-            do_logging=False  # Disable verbose C++ logging
+            maximum_tanimoto_similarity=0.30,  # Lower to prevent merging
+            max_iters=max_iters_optimized,
+            minimum_point_number_dense=minimum_point_number,
+            minimum_point_number_sparse=minimum_point_number_sparse,
+            maximum_model_number=20000,
+            sampler_id=sampler_id_optimized,  # Z-Aligned sampler
+            scoring_exponent=0.0,
+            do_logging=False
         )
         
         # Force flush immediately after C++ call
@@ -396,8 +401,16 @@ def main():
         
         num_models = lines.shape[0] if lines.size > 0 else 0
         
+        # Separate dense and sparse lines
+        dense_mask = (line_types == 0)
+        sparse_mask = (line_types == 1)
+        num_dense = np.sum(dense_mask)
+        num_sparse = np.sum(sparse_mask)
+        
         print(f"   ✓ Completed in {elapsed_time:.2f} seconds")
-        print(f"   ✓ Detected {num_models} line models (before filtering)")
+        print(f"   ✓ Detected {num_models} line models total:")
+        print(f"      - {num_dense} DENSE lines")
+        print(f"      - {num_sparse} SPARSE lines")
 
 
         print(f"   → Note: Timing breakdown not directly available in Python bindings")
@@ -456,14 +469,9 @@ def main():
         
         print(f"   ✓ Kept {len(valid_line_indices)} parallel lines out of {len(parallel_valid_indices)} time-axis-parallel lines")
         
-        # Summary of detection pipeline
-        print(f"\n   📊 DETECTION PIPELINE SUMMARY:")
-        print(f"      Stage 1 (Progressive-X): {num_models} suggested/proposed lines")
-        print(f"      Stage 2 (Mutual parallel): {len(valid_line_indices)} final lines (all parallel to each other)")
-        
 
         # Visualization
-        print("\n6. Visualizing results...")
+        print("\n4. Visualizing results...")
         
         # Create figure with multiple subplots
         fig = plt.figure(figsize=(20, 6))
@@ -489,8 +497,14 @@ def main():
             mask = (labeling == instance_label)
             points_line = points_normalized[mask]
             if len(points_line) > 0:
-                ax2.scatter(points_line[:, 0], points_line[:, 1], points_line[:, 2],
-                           c=[colors_det[i]], s=5, alpha=0.6, label=f'Line {i+1}')
+                # Color by line type: dense = solid, sparse = lighter/transparent
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                if line_type == 0:  # Dense line
+                    ax2.scatter(points_line[:, 0], points_line[:, 1], points_line[:, 2],
+                               c=[colors_det[i]], s=5, alpha=0.6, label=f'Dense {i+1}')
+                else:  # Sparse line
+                    ax2.scatter(points_line[:, 0], points_line[:, 1], points_line[:, 2],
+                               c=[colors_det[i]], s=3, alpha=0.4, marker='^', label=f'Sparse {i+1}')
         
         # Draw detected lines
         for i, idx in enumerate(valid_line_indices):
@@ -510,8 +524,13 @@ def main():
                 t_min, t_max = projections.min(), projections.max()
                 p_start = line_point + t_min * line_dir
                 p_end = line_point + t_max * line_dir
-                ax2.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], [p_start[2], p_end[2]],
-                        'k-', linewidth=2, alpha=0.5)
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                if line_type == 0:  # Dense line
+                    ax2.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], [p_start[2], p_end[2]],
+                            'k-', linewidth=2, alpha=0.5)
+                else:  # Sparse line
+                    ax2.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], [p_start[2], p_end[2]],
+                            'k--', linewidth=1.5, alpha=0.3)
         
         ax2.set_xlabel('X (pixels)')
         ax2.set_ylabel('Y (pixels)')
@@ -530,7 +549,7 @@ def main():
         # Plot all points as background
         ax3.scatter(points_normalized[:, 0], points_normalized[:, 1], c='lightgray', s=1, alpha=0.3)
         
-        # Plot detected lines
+        # Plot detected lines (color by type)
         for i, idx in enumerate(valid_line_indices):
             if use_zero_indexed:
                 instance_label = idx
@@ -539,9 +558,13 @@ def main():
             mask = (labeling == instance_label)
             points_line = points_normalized[mask]
             if len(points_line) > 0:
-                ax3.scatter(points_line[:, 0], points_line[:, 1], c=[colors_det[i]], s=5, alpha=0.6, label=f'Line {i+1}')
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                if line_type == 0:  # Dense line
+                    ax3.scatter(points_line[:, 0], points_line[:, 1], c=[colors_det[i]], s=5, alpha=0.6, label=f'Dense {i+1}')
+                else:  # Sparse line
+                    ax3.scatter(points_line[:, 0], points_line[:, 1], c=[colors_det[i]], s=3, alpha=0.4, marker='^', label=f'Sparse {i+1}')
             
-            # Draw line in 2D projection
+            # Draw line in 2D projection (dense = solid, sparse = dashed)
             line_point = np.array([lines[idx, 0], lines[idx, 1], lines[idx, 2]])
             line_dir = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
             line_dir = line_dir / np.linalg.norm(line_dir)
@@ -559,7 +582,11 @@ def main():
                 t_min, t_max = projections.min(), projections.max()
                 p_start = line_point + t_min * line_dir
                 p_end = line_point + t_max * line_dir
-                ax3.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], 'k-', linewidth=2, alpha=0.7)
+                line_type = line_types[idx] if idx < len(line_types) else 0
+                if line_type == 0:  # Dense line
+                    ax3.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], 'k-', linewidth=2, alpha=0.7)
+                else:  # Sparse line
+                    ax3.plot([p_start[0], p_end[0]], [p_start[1], p_end[1]], 'k--', linewidth=1.5, alpha=0.5)
         
         ax3.set_xlabel('X (pixels)')
         ax3.set_ylabel('Y (pixels)')
@@ -575,7 +602,7 @@ def main():
         plt.close()
         
         # Create separate figure: Event heatmap with line centroids
-        print("\n7. Creating event heatmap with line centroids...")
+        print("\n5. Creating event heatmap with line centroids...")
         
         # Get image dimensions from metadata or from data range
         if metadata and 'geometry' in metadata and metadata['geometry']:

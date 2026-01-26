@@ -127,3 +127,23 @@ int findLines3DTemporal_(
 	const size_t &sampler_id,
 	const double &scoring_exponent,
 	const bool do_logging);
+
+int findLines3DDual_(
+	std::vector<double>& input_points,
+	std::vector<double>& weights,
+	std::vector<size_t>& labeling,
+	std::vector<double>& lines,
+	std::vector<int>& line_types,  // 0 = dense, 1 = sparse
+	const double &spatial_coherence_weight,
+	const double &threshold_dense,
+	const double &threshold_sparse,
+	const double &confidence,
+	const double &neighborhood_ball_radius,
+	const double &maximum_tanimoto_similarity,
+	const size_t &max_iters,
+	const size_t &minimum_point_number_dense,
+	const size_t &minimum_point_number_sparse,
+	const int &maximum_model_number,
+	const size_t &sampler_id,
+	const double &scoring_exponent,
+	const bool do_logging);
