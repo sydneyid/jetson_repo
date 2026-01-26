@@ -42,7 +42,7 @@ finally:
     except:
         pass
 
-def read_hdf5_events(hdf5_path, time_window=0.1, start_time=None):
+def read_hdf5_events(hdf5_path, time_window=0.1, events_constraint=None, start_time=None):
     """
     Read events from HDF5 file and create 3D point cloud from (x, y, t)
     
@@ -101,7 +101,15 @@ def read_hdf5_events(hdf5_path, time_window=0.1, start_time=None):
         x_filtered = x_filtered[p_mask]
         y_filtered = y_filtered[p_mask]
         t_filtered = t_filtered[p_mask]   
-        # p_filtered = p_filtered[time_mask] 
+        p_filtered = p_filtered[p_mask] 
+
+        if events_constraint is not None and len(x_filtered) > events_constraint:
+            # Downsample events to meet the constraint
+            x_filtered = x_filtered[0:events_constraint]
+            y_filtered = y_filtered[0:events_constraint]
+            t_filtered = t_filtered[0:events_constraint]
+            p_filtered = p_filtered[0:events_constraint]
+
         
         print(f"  Time range: {t.min()/1e6:.3f}s to {t.max()/1e6:.3f}s (duration: {(t.max()-t.min())/1e6:.3f}s)")
         print(f"  Spatial range: X=[{x.min()}, {x.max()}], Y=[{y.min()}, {y.max()}]")
@@ -203,7 +211,7 @@ def main():
     print("="*70)
     
     # Read HDF5 file
-    hdf5_path = 'img/may_9.hdf5'
+    hdf5_path = '/Users/sydneydolan/Documents/may9_data/Jupiter_In_Focus.hdf5'
     
     if not os.path.exists(hdf5_path):
         print(f"  Error: File not found: {hdf5_path}")
@@ -211,7 +219,11 @@ def main():
     
     print("\n1. Reading HDF5 event file...")
     try:
-        points_raw, metadata = read_hdf5_events(hdf5_path, time_window=0.05, start_time=None)
+        # ADJUSTABLE PARAMETERS FOR FINDING MORE LINES:
+        # - time_window: Increase (e.g., 0.1) to include more events
+        # - events_constraint: Increase (e.g., 1000) to use more events
+        # - start_time: Change to analyze different time period
+        points_raw, metadata = read_hdf5_events(hdf5_path, time_window=0.05, events_constraint = 500,start_time=None)
         print(f"   ✓ Loaded {len(points_raw)} events")
     except Exception as e:
         print(f"     Error reading HDF5 file: {e}")
@@ -285,24 +297,23 @@ def main():
     
     data_range = np.max(points_normalized.max(axis=0) - points_normalized.min(axis=0))
     
-    # Set threshold - EXTREMELY PERMISSIVE to detect MANY more lines
-    # Lower threshold to detect many more lines (including very sparse ones)
-    threshold_from_range = data_range * 0.0005  # 0.05% of range (extremely permissive)
-    threshold_from_noise = estimated_noise * 0.8  # 0.8× noise (extremely permissive)
+    # ADJUSTED FOR SPARSE LINE: More permissive threshold to catch sparse line points
+    # Dense line can handle stricter threshold, but sparse line needs more tolerance
+    threshold_from_range = data_range * 0.001  # Increased from 0.0005 to 0.001 for sparse line
+    threshold_from_noise = estimated_noise * 1.0  # Increased from 0.8 to 1.0 for sparse line
     final_threshold = max(threshold_from_range, threshold_from_noise)
     final_threshold = max(final_threshold, data_range * 0.0003)  # Minimum 0.03% of range
-    final_threshold = min(final_threshold, data_range * 0.008)  # Maximum 0.8% (extremely permissive)
+    final_threshold = min(final_threshold, data_range * 0.015)  # Increased max from 0.008 to 0.015 for sparse line
     
     # Neighborhood radius: scaled to data range (smaller to allow more distinct lines)
     neighbor_radius = data_range * 0.002  # 0.2% of range (smaller to allow more distinct lines)
     neighbor_radius = max(neighbor_radius, estimated_noise * 0.15)
     neighbor_radius = min(neighbor_radius, data_range * 0.010)
     
-    # Minimum point number - BALANCED for finding more lines
-    # True lines have 20-110 points, but we want to find more lines
-    # Reduced from 15 to 10 to allow finding lines with fewer points
-    # This helps find more lines while still rejecting very weak proposals
-    minimum_point_number = 10  # Minimum 10 inliers - allows finding more lines while still filtering weak proposals
+    # ADJUSTABLE: Minimum points per line
+    # To find MORE lines: Decrease (e.g., 5 or 8) to allow sparse lines
+    # To find only STRONG lines: Increase (e.g., 15 or 20)
+    minimum_point_number = 5  # Minimum 10 inliers - allows finding more lines while still filtering weak proposals
     
     print(f"   ✓ Estimated noise: {estimated_noise:.6f}")
     print(f"   ✓ Threshold: {final_threshold:.6f} ({100*final_threshold/data_range:.2f}% of range)")
@@ -310,6 +321,12 @@ def main():
     print(f"   ✓ Minimum points per model: {minimum_point_number}")
     
     # Run Progressive-X Regular 3D line detection (NO temporal constraint)
+    # STRATEGY FOR DENSE + SPARSE LINE:
+    # - More permissive threshold: sparse line points may be further from ideal line
+    # - Lower confidence: more thorough search to find sparse line
+    # - More iterations: sparse line needs more samples to be discovered
+    # - Lower Tanimoto similarity: prevent sparse line from merging with dense line
+    # - Lower minimum points: sparse line has fewer points
     print("\n5. Running Progressive-X Regular 3D line detection (no temporal constraint)...")
     
     # Restore to working variant settings that produced ~18 lines:
@@ -326,8 +343,8 @@ def main():
     # OPTIMIZED: Increased max_iters to find more lines
     # More iterations per proposal = better chance of finding all lines
     if n_points < 2000:
-        # Very small datasets: minimum 500 iterations, scale with points
-        max_iters_optimized = max(500, int(n_points * 0.5))  # ~50% of point count (was 40%), min 500
+        # ADJUSTED FOR SPARSE LINE: More iterations to find sparse line
+        max_iters_optimized = max(1000, int(n_points * 1.0))  # Increased from 500/0.5 to 1000/1.0 for sparse line
     elif n_points < 5000:
         # Small datasets: scale proportionally from baseline (7000 points = 4000 iterations)
         max_iters_optimized = int(n_points * 4000 / 7000)  # Proportional to 7000→4000 baseline (was 3000)
@@ -340,13 +357,9 @@ def main():
     
     print(f"   Using max_iters={max_iters_optimized:,} (scaled from {n_points:,} points)")
     
-    # OPTIMIZATIONS FOR FINDING MORE LINES:
-    # 1. Moderate confidence (0.05) - balance between finding lines and speed
-    #    Lower confidence (0.01) finds more but requires many more iterations per proposal
-    # 2. Z-Aligned sampler - samples points along time-parallel lines, proposals succeed faster
-    # 3. Early termination stops at 24-25 models to avoid unnecessary iterations
-    # SENSITIVITY: If not finding 24 lines, try: conf=0.01, max_iters=5000-10000
-    conf_optimized = 0.05  # Moderate confidence - faster than 0.01, still finds many models
+    # ADJUSTED FOR SPARSE LINE: Lower confidence for thorough search to find sparse line
+    # Sparse lines need more iterations to be discovered
+    conf_optimized = 0.02  # Lowered from 0.05 to 0.02 for thorough search of sparse line
     sampler_id_optimized = 3  # Z-Aligned sampler - samples points with similar X,Y but different Z (ideal for lines parallel to time axis)
     
     print(f"   Settings: conf={conf_optimized} (moderate for speed), sampler=Z-Aligned (for time-parallel lines), max_iters={max_iters_optimized:,}")
@@ -366,12 +379,12 @@ def main():
             conf=conf_optimized,  # OPTIMIZED: Moderate confidence (0.05) for speed while finding many models
             spatial_coherence_weight=0.0,
             neighborhood_ball_radius=neighbor_radius,
-            maximum_tanimoto_similarity=0.40,  # Increased from 0.30 to allow finding even more overlapping parallel lines
+            maximum_tanimoto_similarity=0.30,  # ADJUSTED FOR SPARSE LINE: Lower to prevent sparse line from merging with dense line
             max_iters=max_iters_optimized,  # OPTIMIZED: Reduced from 2M to reasonable value
             minimum_point_number=minimum_point_number,
             maximum_model_number=20000,  # Allow MANY more lines
             sampler_id=sampler_id_optimized,  # OPTIMIZED: Z-Aligned sampler (samples along time-parallel lines)
-            scoring_exponent=0.0,  # NO penalty for shared support (allows many overlapping lines)
+            scoring_exponent=0.0,  # NO penalty for shared support (allows sparse line to compete with dense line)
             do_logging=False  # Disable verbose C++ logging
         )
         
@@ -435,78 +448,18 @@ def main():
             else:
                 print(f"   ✗ Removed line {idx+1}: not parallel to time axis (angle={angle_with_time:.1f}°, threshold=10.0°)")
         
-        # FILTER: Remove lines that aren't parallel to each other
-        # Ensure ALL pairs of lines are within 10° of each other (was 5°, trying 10° to keep more lines)
-        # OPTIMIZATION: Use vectorized operations for O(n²) pairwise comparisons
-        if len(parallel_valid_indices) > 1:
-            print(f"\n   Filtering: Ensuring all lines are parallel to each other (all pairs within 10°)...")
-            final_valid_indices = list(parallel_valid_indices)
-            
-            # OPTIMIZATION: Vectorized approach - compute all pairwise dot products at once
-            # Build matrix of normalized directions (only once)
-            n_lines = len(final_valid_indices)
-            dirs_matrix = np.zeros((n_lines, 3))
-            for pos, idx in enumerate(final_valid_indices):
-                dir_vec = np.array([lines[idx, 3], lines[idx, 4], lines[idx, 5]])
-                dirs_matrix[pos] = dir_vec / np.linalg.norm(dir_vec)
-            
-            # Compute pairwise dot products: dirs_matrix @ dirs_matrix.T gives n×n matrix
-            # Each element [i,j] is dot(dirs[i], dirs[j])
-            pairwise_dots = np.abs(dirs_matrix @ dirs_matrix.T)  # n×n matrix
-            
-            # Remove lines that aren't parallel to all others
-            removed_any = True
-            iteration = 0
-            max_iterations = 10  # Prevent infinite loops
-            
-            while removed_any and len(final_valid_indices) > 1 and iteration < max_iterations:
-                removed_any = False
-                iteration += 1
-                lines_to_remove = []
-                
-                # OPTIMIZATION: Use vectorized check - for each line, check if ALL other dots >= threshold
-                # Create a mask to exclude diagonal (self-comparisons)
-                mask = np.ones_like(pairwise_dots, dtype=bool)
-                np.fill_diagonal(mask, False)  # Exclude self-comparisons
-                
-                # For each line, check if minimum dot product with others is >= threshold
-                # If min < threshold, this line is not parallel to at least one other
-                min_dots_per_line = np.where(mask, pairwise_dots, 1.0).min(axis=1)
-                invalid_positions = np.where(min_dots_per_line < parallel_threshold)[0]
-                
-                for pos in invalid_positions:
-                    idx = final_valid_indices[pos]
-                    lines_to_remove.append((pos, idx))
-                    removed_any = True
-                
-                # Remove invalid lines (in reverse order to maintain indices)
-                for pos, idx in sorted(lines_to_remove, reverse=True):
-                    # Find which line it wasn't parallel to for reporting
-                    non_parallel_pos = np.where(pairwise_dots[pos] < parallel_threshold)[0]
-                    if len(non_parallel_pos) > 0:
-                        other_pos = non_parallel_pos[0]
-                        if other_pos != pos:  # Don't compare with self
-                            other_idx = final_valid_indices[other_pos]
-                            angle_deg = np.arccos(np.clip(pairwise_dots[pos, other_pos], -1, 1)) * 180 / np.pi
-                            print(f"   ✗ Removed line {idx+1}: not parallel to line {other_idx+1} (angle={angle_deg:.1f}°, threshold=10.0°)")
-                    
-                    # Remove from final_valid_indices
-                    final_valid_indices.pop(pos)
-                    # Remove row and column from matrices (more efficient than rebuilding)
-                    dirs_matrix = np.delete(dirs_matrix, pos, axis=0)
-                    pairwise_dots = np.delete(np.delete(pairwise_dots, pos, axis=0), pos, axis=1)
-            
-            valid_line_indices = final_valid_indices
-        else:
-            valid_line_indices = parallel_valid_indices
+        # ADJUSTABLE: Parallelism threshold (degrees from time axis)
+        # ADJUSTED FOR SPARSE LINE: Slightly more lenient to ensure sparse line passes
+        # To find MORE lines: Increase (e.g., 2.0 or 5.0) to allow lines slightly off time axis
+        # To find only PERFECTLY parallel lines: Decrease (e.g., 0.5)
+        valid_line_indices = parallel_check(lines, labeling, num_models, parallel_threshold=2.0, print_updates=True)
         
         print(f"   ✓ Kept {len(valid_line_indices)} parallel lines out of {len(parallel_valid_indices)} time-axis-parallel lines")
         
         # Summary of detection pipeline
         print(f"\n   📊 DETECTION PIPELINE SUMMARY:")
         print(f"      Stage 1 (Progressive-X): {num_models} suggested/proposed lines")
-        print(f"      Stage 2 (Time-axis parallel): {len(parallel_valid_indices)} lines parallel to time axis")
-        print(f"      Stage 3 (Mutual parallel): {len(valid_line_indices)} final lines (all parallel to each other)")
+        print(f"      Stage 2 (Mutual parallel): {len(valid_line_indices)} final lines (all parallel to each other)")
         
 
         # Visualization
