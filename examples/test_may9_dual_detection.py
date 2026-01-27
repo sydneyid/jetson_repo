@@ -217,12 +217,16 @@ def main():
     print("Progressive-X Dual 3D Line Detection on May 9 HDF5 Event Data")
     print("Using findLines3DDual for dense + sparse line detection")
     print("="*70)
-    
-    # Read HDF5 file
+
+    # Same parameters on Jetson and desktop: fix randomness used for noise/threshold estimation
+    np.random.seed(42)
+
+    # Read HDF5 file (path is relative to cwd – run from examples/: cd examples && python test_may9_dual_detection.py)
     hdf5_path = 'img/may_9.hdf5'
-    
+
     if not os.path.exists(hdf5_path):
         print(f"  Error: File not found: {hdf5_path}")
+        print(f"  Run from examples/ dir:  cd examples  &&  python test_may9_dual_detection.py")
         return 1
     
     print("\n1. Reading HDF5 event file...")
@@ -307,7 +311,10 @@ def main():
     print(f"     Base threshold: {base_threshold:.6f} ({100*base_threshold/data_range:.2f}% of range)")
     print(f"     Neighborhood radius: {neighbor_radius:.6f}")
     print(f"     Minimum points per model: {minimum_point_number}")
-    
+
+    # Compare Jetson vs desktop: if these match but line counts differ, the difference is in the C++ build/env
+    print(f"     [DIAG] n_points={len(points_normalized)} estimated_noise={estimated_noise:.6f} base_threshold={base_threshold:.6f} neighbor_radius={neighbor_radius:.6f}")
+
     print("\n4. Running Progressive-X Dual 3D line detection...")
     
     n_points = len(points_normalized)
@@ -380,7 +387,11 @@ def main():
         print(f"     Detected {num_models} line models total:")
         print(f"      - {num_dense} DENSE lines")
         print(f"      - {num_sparse} SPARSE lines")
-        
+
+        if num_models == 0:
+            print("     [Jetson vs desktop] If the other machine finds lines: compare the [DIAG] line above.")
+            print("     Same [DIAG] values + 0 lines here => C++/build/env differs. Different => run from examples/ and use same data.")
+
         # Labeling scheme: label 0 = outliers, labels 1+ = lines
         unique_labels = np.unique(labeling)
 
