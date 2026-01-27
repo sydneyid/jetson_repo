@@ -5,8 +5,8 @@ Check that PEARL and Graph-Cut RANSAC are running inside Progressive-X.
 Uses findLines3D (single 3D-line mode) with do_logging=True. The C++ code prints
   "Proposal engine (GC-RANSAC): X.XXX seconds"
   "PEARL optimization: X.XXX seconds"
-when both run. We use time-parallel synthetic data so proposals pass the built-in
-time-axis filter.
+when both run. Uses minimal time-parallel data and maximum_model_number=1 so
+it stops after finding one line (typically a few seconds).
 
 Run from examples/:
   cd examples && python3 check_pearl_gcransac.py
@@ -31,18 +31,22 @@ def main():
         return 1
     print("   OK")
 
-    print("\n2. Building time-parallel synthetic 3D line (direction ~ (0,0,1))...")
+    print("\n2. Building minimal time-parallel synthetic 3D line (direction ~ (0,0,1))...")
     np.random.seed(42)
-    n = 200
+    n = 80  # minimal set – one clear line
     x0, y0 = 100.0, 50.0
-    t = np.linspace(0, 500, n)
-    # Time-parallel line: (x0, y0, t) -> direction (0, 0, 1)
+    t = np.linspace(0, 100, n)
     pts = np.column_stack([np.full(n, x0), np.full(n, y0), t])
-    pts += 0.5 * np.random.randn(*pts.shape)
+    pts += 0.3 * np.random.randn(*pts.shape)
     points = np.ascontiguousarray(pts, dtype=np.float64)
-    print("   Shape:", points.shape, "  (x≈{}, y≈{}, t in [0,500])".format(x0, y0))
+    data_range = float(np.ptp(points))
+    print("   Shape:", points.shape, "  (x≈{}, y≈{}, t in [0,100]), range≈{:.0f}".format(x0, y0, data_range))
 
-    print("\n3. Calling findLines3D(..., do_logging=True) and capturing C++ stdout...")
+    # Stop after 1 model so we don't run 300+ proposal cycles (max_model_number=1 is key for speed)
+    threshold = max(2.0, data_range * 0.015)
+    neighbor_radius = max(4.0, data_range * 0.03)
+    max_iters = 150  # per proposal – enough to find one clear line
+    print("\n3. Calling findLines3D (max_model_number=1, max_iters={})...".format(max_iters))
     # C++ printf writes to fd 1; redirect it so we can check for GC-RANSAC and PEARL
     r, w = os.pipe()
     old_fd1 = os.dup(1)
@@ -52,15 +56,15 @@ def main():
         lines, labeling = pyprogressivex.findLines3D(
             points,
             np.ascontiguousarray([], dtype=np.float64),
-            threshold=1.0,
+            threshold=threshold,
             conf=0.95,
             spatial_coherence_weight=0.0,
-            neighborhood_ball_radius=2.0,
+            neighborhood_ball_radius=neighbor_radius,
             maximum_tanimoto_similarity=0.4,
-            max_iters=2000,
-            minimum_point_number=10,
-            maximum_model_number=10,
-            sampler_id=0,
+            max_iters=max_iters,
+            minimum_point_number=6,
+            maximum_model_number=1,
+            sampler_id=3,  # Z-aligned sampler – fast for time-parallel lines
             scoring_exponent=1.0,
             do_logging=True,
         )
