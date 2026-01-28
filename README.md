@@ -2,6 +2,10 @@
 
 This guide explains how to set up and run `test_may9_dual_detection.py` on a Jetson Nano running Linux.
 
+## Building the .so files in `src/pyprogressivex`
+
+The C++ extension is built as **shared libraries (`.so`)** in `src/pyprogressivex/`. You must build them on each machine (run `pip install -e .` from the repo root). See **Manual Setup → step 4** below for where they are created and how to build and verify them.
+
 ## Quick Start
 
 The easiest way to set up and run the test is using the provided shell script:
@@ -62,15 +66,40 @@ If the repository doesn't have the `graph-cut-ransac` submodule, you may need to
 git clone https://github.com/danini/graph-cut-ransac.git graph-cut-ransac
 ```
 
-### 4. Build and Install pyprogressivex
+### 4. Build and Install pyprogressivex (build the .so files)
+
+The Python package `pyprogressivex` uses a **C++ extension** that is compiled into one or more **shared library (`.so`) files** in `src/pyprogressivex/`. You must build these on each machine (Jetson, Mac, etc.); do not copy `.so` files from another architecture.
+
+**Where the .so files live**
+
+- **Directory:** `src/pyprogressivex/`
+- **Names:** `pyprogressivex.cpython-<PYVER>-<PLATFORM>.so`  
+  Examples:
+  - Linux (Jetson): `pyprogressivex.cpython-39-linux-aarch64.so` or similar
+  - macOS: `pyprogressivex.cpython-312-darwin.so` or similar
+- You may also see `libGraphCutRANSAC.dylib` (or `.so` on Linux) there; that is the Graph-Cut RANSAC library used by the extension.
+
+**How to build the .so files**
+
+From the **repository root** (the directory that contains `setup.py` and `src/`):
 
 ```bash
 # If using conda, set CMAKE_PREFIX_PATH
 export CMAKE_PREFIX_PATH="$CONDA_PREFIX"  # Optional, only if using conda
 
-# Build and install
+# Build and install (this compiles C++ and writes .so into src/pyprogressivex/)
 pip install -e .
 ```
+
+This runs CMake, compiles the C++ code (Progressive-X, PEARL, Graph-Cut RANSAC), and places the resulting `.so` in `src/pyprogressivex/`. **It also rebuilds the libGraphCutRANSAC dynamic library** (e.g. `libGraphCutRANSAC.so` on Linux/Jetson, `libGraphCutRANSAC.dylib` on macOS) in the same directory; the pyprogressivex extension links to it. The `-e` (editable) install makes Python load that extension from the repo.
+
+**Check that the .so was built**
+
+```bash
+ls -la src/pyprogressivex/*.so
+```
+
+You should see at least one `pyprogressivex.cpython-*.so`. If the list is empty, the build did not complete; see Troubleshooting below.
 
 ### 5. Verify Installation
 
@@ -127,12 +156,16 @@ See `requirements.txt` for the complete list. Main dependencies:
    rm -rf build/ src/pyprogressivex/*.so
    pip install -e . --force-reinstall
    ```
+4. **HDF5 Reading Errors**: If it says that a hdf5 file cannot be read synchronously, you need to install the hdf5 codec. (https://github.com/prophesee-ai/hdf5_ecf). If this codec has already been installed, remember to set the HDF5 plugin path. 
+   ```bash
+   export HDF5_PLUGIN_PATH=/usr/local/lib/hdf5/plugin  
+   ```
 
 ### Import Error
 
 If `import pyprogressivex` fails:
 
-1. **Check if module was built**:
+1. **Check if the .so files were built** (see “Building the .so files” above):
    ```bash
    ls -la src/pyprogressivex/*.so
    ```
