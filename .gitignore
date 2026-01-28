@@ -354,4 +354,5 @@ build
 *.png
 *.jpg
 *.txt
+!requirements.txt
 *.csv

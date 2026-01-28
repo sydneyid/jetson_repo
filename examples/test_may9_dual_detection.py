@@ -348,7 +348,18 @@ def main():
         threshold_dense = base_threshold * 0.9  # Slightly relaxed for dense lines
         threshold_sparse = base_threshold * 2.5  # More permissive for sparse lines
         minimum_point_number_sparse = max(3, minimum_point_number // 2)  # Lower minimum for sparse
-        
+
+        # When [DIAG] matches desktop but Jetson finds 0 lines, C++ numerics/randomness differ.
+        # Set PROGRESSIVEX_JETSON_RELAX=1 on the Jetson to slightly relax thresholds/neighbor.
+        if os.environ.get("PROGRESSIVEX_JETSON_RELAX", "").strip() in ("1", "yes", "true"):
+            relax = 1.25
+            threshold_dense *= relax
+            threshold_sparse *= relax
+            neighbor_radius_relaxed = neighbor_radius * relax
+            print(f"   [Jetson relax] threshold_dense={threshold_dense:.6f} threshold_sparse={threshold_sparse:.6f} neighbor_radius={neighbor_radius_relaxed:.6f}")
+        else:
+            neighbor_radius_relaxed = neighbor_radius
+
         print(f"   Dense line detection: threshold={threshold_dense:.6f} ({100*threshold_dense/data_range:.2f}% of range), min_points={minimum_point_number}")
         print(f"   Sparse line detection: threshold={threshold_sparse:.6f} ({100*threshold_sparse/data_range:.2f}% of range), min_points={minimum_point_number_sparse}")
         
@@ -359,7 +370,7 @@ def main():
             threshold_sparse=threshold_sparse,
             conf=conf_dense,
             spatial_coherence_weight=0.0,
-            neighborhood_ball_radius=neighbor_radius,
+            neighborhood_ball_radius=neighbor_radius_relaxed,
             maximum_tanimoto_similarity=0.35,
             max_iters=max_iters_optimized,
             minimum_point_number_dense=minimum_point_number,
@@ -367,7 +378,8 @@ def main():
             maximum_model_number=20000,
             sampler_id=sampler_id_optimized,
             scoring_exponent=0.0,
-            do_logging=False
+            do_logging=False,
+            random_seed=42,
         )
         
         sys.stdout.flush()

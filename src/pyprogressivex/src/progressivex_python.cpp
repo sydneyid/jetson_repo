@@ -15,6 +15,7 @@
 #include "neighborhood/grid_neighborhood_graph.h"
 #include "neighborhood/flann_neighborhood_graph.h"
 
+#include "uniform_random_generator.h"
 #include "samplers/uniform_sampler.h"
 #include "samplers/prosac_sampler.h"
 #include "samplers/napsac_sampler.h"
@@ -1583,10 +1584,15 @@ int findLines3DDual_(
 	const int &maximum_model_number,
 	const size_t &sampler_id,
 	const double &scoring_exponent,
-	const bool do_logging)
+	const bool do_logging,
+	int random_seed)
 {
 	// Initialize Google's logging library (once globally)
 	initGoogleLoggingOnce();
+
+	// Reproducibility: use fixed RNG seed when given (same results on Jetson and Mac)
+	if (random_seed >= 0)
+		gcransac::utils::setDefaultRandomSeed(static_cast<int64_t>(random_seed));
 	
 	const size_t num_tents = input_points.size() / 3; // 3D points: x, y, z
 	cv::Mat points(num_tents, 3, CV_64F, &input_points[0]);
@@ -1620,6 +1626,8 @@ int findLines3DDual_(
 	else
 	{
 		fprintf(stderr, "Unknown sampler identifier: %d\n", sampler_id);
+		if (random_seed >= 0)
+			gcransac::utils::setDefaultRandomSeed(-1);
 		return 0;
 	}
 
@@ -1719,6 +1727,8 @@ int findLines3DDual_(
 			lines.emplace_back(model.descriptor(5));
 			line_types.push_back(0); // Dense line
 		}
+		if (random_seed >= 0)
+			gcransac::utils::setDefaultRandomSeed(-1);
 		return num_dense_lines;
 	}
 
@@ -1865,5 +1875,7 @@ int findLines3DDual_(
 	if (do_logging)
 		printf("Total: %zu lines (%zu dense, %zu sparse)\n", total_lines, num_dense_lines, num_sparse_lines);
 
+	if (random_seed >= 0)
+		gcransac::utils::setDefaultRandomSeed(-1);
 	return total_lines;
 }

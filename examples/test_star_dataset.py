@@ -301,8 +301,11 @@ def main():
             inlier_ratio = inlier_count / len(distances) if len(distances) > 0 else 0
             
             print(f"     Line {idx+1}: {len(points_assigned)} points assigned")
-            print(f"       Distances: min={distances.min():.6f}, max={distances.max():.6f}, mean={distances.mean():.6f}, median={np.median(distances):.6f}")
-            print(f"       Within threshold ({final_threshold:.6f}): {inlier_count}/{len(distances)} ({inlier_ratio*100:.1f}%)")
+            if len(distances) > 0:
+                print(f"       Distances: min={distances.min():.6f}, max={distances.max():.6f}, mean={distances.mean():.6f}, median={np.median(distances):.6f}")
+                print(f"       Within threshold ({final_threshold:.6f}): {inlier_count}/{len(distances)} ({inlier_ratio*100:.1f}%)")
+            else:
+                print(f"       (no points — skipping distance stats)")
         
         # Also check interpretation 2: label 0 might be first model
         print(f"\n   Testing interpretation 2: labels 0-{model_number-1} = models (label {model_number} = outliers?)")
@@ -467,11 +470,12 @@ def main():
             distances = np.array(distances)
             inlier_ratio = np.sum(distances <= final_threshold) / len(distances) if len(distances) > 0 else 0
             
-            # Plot points colored by distance
-            scatter = ax.scatter(points_assigned[:, 0], points_assigned[:, 1], 
-                                c=distances, s=30, alpha=0.7, cmap='RdYlGn', 
-                                vmin=0, vmax=final_threshold*2)
-            plt.colorbar(scatter, ax=ax, label='Distance to line')
+            # Plot points colored by distance (skip scatter when no points to avoid empty-array reduction errors)
+            if len(points_assigned) > 0:
+                scatter = ax.scatter(points_assigned[:, 0], points_assigned[:, 1], 
+                                    c=distances, s=30, alpha=0.7, cmap='RdYlGn', 
+                                    vmin=0, vmax=final_threshold*2)
+                plt.colorbar(scatter, ax=ax, label='Distance to line')
             
             # Draw the line
             if abs(b) > 1e-10:

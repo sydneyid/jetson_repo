@@ -146,4 +146,5 @@ int findLines3DDual_(
 	const int &maximum_model_number,
 	const size_t &sampler_id,
 	const double &scoring_exponent,
-	const bool do_logging);
+	const bool do_logging,
+	int random_seed = -1);  // if >= 0, use fixed seed for reproducibility (Jetson vs Mac)

@@ -91,6 +91,9 @@ class CMakeBuild(build_ext):
         copyfile(src_file, dest_file)
         copymode(src_file, dest_file)
 
+# Directory containing this setup.py and CMakeLists.txt (repo root)
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+
 setup(
     name='pyprogressivex',
     version='0.1',
@@ -100,7 +103,7 @@ setup(
     long_description='',
     packages=find_packages('src'),
     package_dir={'':'src'},
-    ext_modules=[CMakeExtension('pyprogressivex/pyprogressivex')],
+    ext_modules=[CMakeExtension('pyprogressivex/pyprogressivex', sourcedir=_this_dir)],
     cmdclass=dict(build_ext=CMakeBuild),
     #test_suite='tests',
     zip_safe=False,

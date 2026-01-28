@@ -485,7 +485,8 @@ py::tuple findLines3DDual(
 	int maximum_model_number,
 	int sampler_id,
 	double scoring_exponent,
-	bool do_logging) 
+	bool do_logging,
+	int random_seed) 
 {
 	py::buffer_info buf1 = points_.request();
 	size_t NUM_TENTS = buf1.shape[0];
@@ -533,7 +534,8 @@ py::tuple findLines3DDual(
 		maximum_model_number,
 		sampler_id,
 		scoring_exponent,
-		do_logging);
+		do_logging,
+		random_seed);
 		
 	py::array_t<int> labeling_ = py::array_t<int>(NUM_TENTS);
 	py::buffer_info buf3 = labeling_.request();
@@ -823,6 +825,7 @@ PYBIND11_PLUGIN(pyprogressivex) {
 			sampler_id: sampling type (0=uniform, 1=PROSAC, 2=NAPSAC, 3=Z-Aligned, default: 3)
 			scoring_exponent: scoring exponent (default: 0.0)
 			do_logging: enable verbose logging (default: False)
+			random_seed: if >= 0, use fixed RNG seed for reproducibility across machines (Jetson vs Mac). -1 = use OS entropy.
 		
 		Returns:
 			tuple: (lines, labeling, line_types) where:
@@ -844,7 +847,8 @@ PYBIND11_PLUGIN(pyprogressivex) {
 		py::arg("maximum_model_number") = 20000,
 		py::arg("sampler_id") = 3,
 		py::arg("scoring_exponent") = 0.0,
-		py::arg("do_logging") = false);
+		py::arg("do_logging") = false,
+		py::arg("random_seed") = -1);
 
   return m.ptr();
 }

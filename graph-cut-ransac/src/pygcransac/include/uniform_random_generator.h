@@ -33,6 +33,7 @@
 // Author: Daniel Barath (barath.daniel@sztaki.mta.hu)
 #pragma once
 
+#include <cstdint>
 #include <random>
 #include <algorithm>
 
@@ -40,6 +41,11 @@ namespace gcransac
 {
 	namespace utils
 	{
+		// Optional fixed seed for reproducibility across machines (Jetson vs Mac).
+		// If >= 0, all UniformRandomGenerator() instances use it; else use std::random_device.
+		inline int64_t g_default_rng_seed = -1;
+		inline void setDefaultRandomSeed(int64_t seed) { g_default_rng_seed = seed; }
+
 		template <typename _ValueType>
 		class UniformRandomGenerator
 		{
@@ -49,8 +55,12 @@ namespace gcransac
 
 		public:
 			UniformRandomGenerator() {
-				std::random_device rand_dev;
-				generator = std::mt19937(rand_dev());
+				if (g_default_rng_seed >= 0)
+					generator = std::mt19937(static_cast<std::mt19937::result_type>(g_default_rng_seed));
+				else {
+					std::random_device rand_dev;
+					generator = std::mt19937(rand_dev());
+				}
 			}
 
 			~UniformRandomGenerator() {
